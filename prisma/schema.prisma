@@ -356,8 +356,19 @@ model Attachment {
 
 // ═══ RECURRENCE ═══
 
-enum RecurrenceFrequency { daily; weekly; monthly; yearly; custom }
-enum RecurrenceEndType { never; after_count; on_date }
+enum RecurrenceFrequency {
+daily
+weekly
+monthly
+yearly
+custom
+}
+
+enum RecurrenceEndTyoe {
+never
+after_count
+on_date
+}
 
 model RecurrenceRule {
   id                    String              @id @default(uuid()) @db.Uuid
@@ -479,8 +490,15 @@ model Template {
 
 // ═══ SAVED VIEWS ═══
 
-enum ViewType { list; board; calendar }
-enum ViewVisibility { personal; shared }
+enum ViewType {
+ list
+ board
+ calendar
+ }
+enum ViewVisibility {
+ personal
+ shared
+ }
 
 model SavedView {
   id          String         @id @default(uuid()) @db.Uuid
