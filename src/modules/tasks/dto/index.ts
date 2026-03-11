@@ -1,0 +1,9 @@
+import { IsString, IsNotEmpty, MaxLength, IsOptional, IsUUID, IsEnum, IsDateString, IsBoolean, IsArray } from 'class-validator';
+import { TaskStatus, TaskPriority } from '@prisma/client';
+export class CreateTaskDto { @IsString() @IsNotEmpty() @MaxLength(255) title: string = ''; @IsOptional() @IsString() description?: string; @IsOptional() @IsEnum(TaskPriority) priority?: TaskPriority; @IsOptional() @IsUUID() assigneeId?: string; @IsOptional() @IsDateString() startDate?: string; @IsOptional() @IsString() startTime?: string; @IsOptional() @IsDateString() dueDate?: string; @IsOptional() @IsString() dueTime?: string; @IsOptional() @IsString() timezone?: string; @IsOptional() @IsUUID() parentTaskId?: string; }
+export class UpdateTaskDto { @IsOptional() @IsString() @MaxLength(255) title?: string; @IsOptional() @IsString() description?: string; @IsOptional() @IsEnum(TaskStatus) status?: TaskStatus; @IsOptional() @IsEnum(TaskPriority) priority?: TaskPriority; @IsOptional() @IsUUID() assigneeId?: string | null; @IsOptional() @IsDateString() startDate?: string | null; @IsOptional() @IsDateString() dueDate?: string | null; }
+export class TaskFilterDto { @IsOptional() @IsEnum(TaskStatus) status?: TaskStatus; @IsOptional() @IsEnum(TaskPriority) priority?: TaskPriority; @IsOptional() @IsUUID() assigneeId?: string; @IsOptional() @IsString() sortBy?: string; @IsOptional() @IsString() sortOrder?: string; }
+export class BatchActionDto { @IsArray() @IsUUID(undefined, { each: true }) taskIds: string[] = []; @IsString() action: string = ''; @IsOptional() value?: string; }
+export class CreateChecklistItemDto { @IsString() @IsNotEmpty() @MaxLength(500) text: string = ''; }
+export class UpdateChecklistItemDto { @IsOptional() @IsString() @MaxLength(500) text?: string; @IsOptional() @IsBoolean() isChecked?: boolean; }
+export class ReorderChecklistDto { @IsArray() @IsUUID(undefined, { each: true }) itemIds: string[] = []; }
