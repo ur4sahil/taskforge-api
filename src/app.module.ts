@@ -29,10 +29,19 @@ import { JwtAuthGuard } from './common/guards';
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig] }),
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60000, limit: 100 }]),
-    BullModule.forRootAsync({ useFactory: () => {
-      const url = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
-      return { connection: { host: url.hostname, port: parseInt(url.port || '6379', 10), password: url.password || undefined, tls: url.protocol === 'rediss:' ? {} : undefined } };
-    }}),
+    BullModule.forRootAsync({
+      useFactory: () => {
+        const url = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
+        return {
+          connection: {
+            host: url.hostname,
+            port: parseInt(url.port || '6379', 10),
+            password: url.password || undefined,
+            tls: url.protocol === 'rediss:' ? {} : undefined,
+          },
+        };
+      },
+    }),
     PrismaModule,
     AuthModule, WorkspacesModule, ListsModule, TasksModule, CommentsModule,
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,

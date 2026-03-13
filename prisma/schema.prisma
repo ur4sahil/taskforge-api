@@ -89,25 +89,25 @@ model WorkspaceMember {
   createdAt               DateTime      @default(now()) @map("created_at")
   updatedAt               DateTime      @updatedAt @map("updated_at")
 
-  workspace       Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  manager         WorkspaceMember?  @relation("ManagerRelation", fields: [managerId], references: [id])
-  reports         WorkspaceMember[] @relation("ManagerRelation")
-  createdTasks    Task[]            @relation("TaskCreator")
-  assignedTasks   Task[]            @relation("TaskAssignee")
-  lockedTasks     Task[]            @relation("TaskLocker")
-  comments        Comment[]
-  attachments     Attachment[]      @relation("AttachmentUploader")
-  reminders       Reminder[]
-  notifications   Notification[]
-  deviceTokens    DeviceToken[]
-  listMembers     ListMember[]
-  createdLists    List[]            @relation("ListCreator")
-  defaultForLists List[]            @relation("ListDefaultAssignee")
-  addedToLists    ListMember[]      @relation("ListMemberAdder")
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  manager          WorkspaceMember?  @relation("ManagerRelation", fields: [managerId], references: [id])
+  reports          WorkspaceMember[] @relation("ManagerRelation")
+  createdTasks     Task[]            @relation("TaskCreator")
+  assignedTasks    Task[]            @relation("TaskAssignee")
+  lockedTasks      Task[]            @relation("TaskLocker")
+  comments         Comment[]
+  attachments      Attachment[]      @relation("AttachmentUploader")
+  reminders        Reminder[]
+  notifications    Notification[]
+  deviceTokens     DeviceToken[]
+  listMembers      ListMember[]
+  createdLists     List[]            @relation("ListCreator")
+  defaultForLists  List[]            @relation("ListDefaultAssignee")
+  addedToLists     ListMember[]      @relation("ListMemberAdder")
   createdTemplates Template[]
-  createdViews    SavedView[]
-  auditLogs       AuditLog[]        @relation("AuditActor")
+  createdViews     SavedView[]
+  auditLogs        AuditLog[]        @relation("AuditActor")
 
   @@unique([workspaceId, userId])
   @@index([workspaceId])

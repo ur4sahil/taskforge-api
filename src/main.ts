@@ -9,8 +9,16 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix('api/v1');
   app.use(helmet());
-  app.enableCors({ origin: process.env.APP_URL || 'http://localhost:3000', credentials: true, methods: ['GET','POST','PATCH','DELETE','OPTIONS'], allowedHeaders: ['Content-Type','Authorization'] });
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: true } }));
+  app.enableCors({
+    origin: process.env.APP_URL || 'http://localhost:3000',
+    credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  });
+  app.useGlobalPipes(new ValidationPipe({
+    whitelist: true, forbidNonWhitelisted: true, transform: true,
+    transformOptions: { enableImplicitConversion: true },
+  }));
   app.useGlobalFilters(new HttpExceptionFilter());
   if (process.env.NODE_ENV !== 'production') {
     const config = new DocumentBuilder().setTitle('TaskForge API').setVersion('1.0').addBearerAuth().build();
