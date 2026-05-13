@@ -15,6 +15,9 @@ export const authConfig = registerAs('auth', () => ({
   jwtRefreshExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
   bcryptRounds: 12,
   refreshTokenDays: 7,
+  googleClientId: process.env.GOOGLE_CLIENT_ID,
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  googleCallbackUrl: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3001/api/v1/auth/google/callback',
 }));
 
 export const redisConfig = registerAs('redis', () => ({
@@ -23,6 +26,11 @@ export const redisConfig = registerAs('redis', () => ({
 
 export const storageConfig = registerAs('storage', () => ({
   r2BucketName: process.env.R2_BUCKET_NAME || 'taskforge-files',
+  r2AccountId: process.env.R2_ACCOUNT_ID,
+  r2AccessKeyId: process.env.R2_ACCESS_KEY_ID,
+  r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  r2PublicUrl: process.env.R2_PUBLIC_URL,
+  presignedUrlExpirySeconds: parseInt(process.env.R2_URL_TTL || '3600', 10),
 }));
 
 export const aiConfig = registerAs('ai', () => ({

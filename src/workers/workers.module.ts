@@ -1,7 +1,7 @@
-import { Module, Logger } from '@nestjs/common';
-import { BullModule } from '@nestjs/bullmq';
+import { Module, Logger, Injectable, OnApplicationBootstrap } from '@nestjs/common';
+import { BullModule, InjectQueue } from '@nestjs/bullmq';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Job } from 'bullmq';
+import { Job, Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Processor('recurring-tasks')
@@ -79,6 +79,39 @@ export class TrashCleanupProcessor extends WorkerHost {
   }
 }
 
+@Injectable()
+export class WorkerScheduler implements OnApplicationBootstrap {
+  private log = new Logger('WorkerScheduler');
+  constructor(
+    @InjectQueue('recurring-tasks') private recurringQ: Queue,
+    @InjectQueue('reminders') private remindersQ: Queue,
+    @InjectQueue('overdue-check') private overdueQ: Queue,
+    @InjectQueue('auto-archive') private archiveQ: Queue,
+    @InjectQueue('trash-cleanup') private trashQ: Queue,
+  ) {}
+
+  async onApplicationBootstrap() {
+    await this.schedule(this.remindersQ, 'reminders-tick', '* * * * *');
+    await this.schedule(this.overdueQ, 'overdue-tick', '*/15 * * * *');
+    await this.schedule(this.recurringQ, 'recurring-tick', '0 * * * *');
+    await this.schedule(this.archiveQ, 'archive-tick', '0 3 * * *');
+    await this.schedule(this.trashQ, 'trash-tick', '0 4 * * *');
+    this.log.log('Repeatable jobs scheduled');
+  }
+
+  private async schedule(queue: Queue, name: string, pattern: string) {
+    const existing = await queue.getRepeatableJobs();
+    for (const r of existing) {
+      if (r.name === name) await queue.removeRepeatableByKey(r.key);
+    }
+    await queue.add(name, {}, {
+      repeat: { pattern },
+      removeOnComplete: { count: 50 },
+      removeOnFail: { count: 50 },
+    });
+  }
+}
+
 @Module({
   imports: [
     BullModule.registerQueue(
@@ -89,6 +122,6 @@ export class TrashCleanupProcessor extends WorkerHost {
       { name: 'trash-cleanup' },
     ),
   ],
-  providers: [RecurringTaskProcessor, ReminderProcessor, OverdueProcessor, AutoArchiveProcessor, TrashCleanupProcessor],
+  providers: [RecurringTaskProcessor, ReminderProcessor, OverdueProcessor, AutoArchiveProcessor, TrashCleanupProcessor, WorkerScheduler],
 })
 export class WorkersModule {}

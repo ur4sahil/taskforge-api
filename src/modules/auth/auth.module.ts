@@ -1,10 +1,20 @@
-import { Module } from '@nestjs/common';
+import { Module, Provider } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { GoogleStrategy } from './strategies/google.strategy';
+
+const GoogleStrategyProvider: Provider = {
+  provide: GoogleStrategy,
+  useFactory: (config: ConfigService) => {
+    if (!config.get('auth.googleClientId') || !config.get('auth.googleClientSecret')) return null;
+    return new GoogleStrategy(config);
+  },
+  inject: [ConfigService],
+};
 
 @Module({
   imports: [
@@ -18,7 +28,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, GoogleStrategyProvider],
   exports: [AuthService, JwtModule],
 })
 export class AuthModule {}

@@ -60,6 +60,31 @@ export class AuthService {
     return this.generateTokens(stored.userId, stored.user.email, ip, ua);
   }
 
+  async loginWithGoogle(profile: { email: string; name: string; avatarUrl: string | null }, ip?: string, ua?: string) {
+    let user = await this.prisma.user.findUnique({ where: { email: profile.email } });
+    if (!user) {
+      user = await this.prisma.user.create({
+        data: {
+          email: profile.email,
+          name: profile.name,
+          avatarUrl: profile.avatarUrl,
+          authProvider: 'google',
+          passwordHash: null,
+        },
+      });
+    } else if (!user.avatarUrl && profile.avatarUrl) {
+      user = await this.prisma.user.update({ where: { id: user.id }, data: { avatarUrl: profile.avatarUrl } });
+    }
+    if (!user.isActive) throw new UnauthorizedException('Account deactivated');
+    const tokens = await this.generateTokens(user.id, user.email, ip, ua);
+    const workspaces = await this.getUserWorkspaces(user.id);
+    return {
+      ...tokens,
+      user: { id: user.id, email: user.email, name: user.name, avatarUrl: user.avatarUrl, authProvider: user.authProvider },
+      workspaces,
+    };
+  }
+
   async logout(token: string) {
     await this.prisma.refreshToken.updateMany({
       where: { tokenHash: this.hashToken(token) },

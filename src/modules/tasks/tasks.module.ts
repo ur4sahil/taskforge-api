@@ -30,7 +30,7 @@ export class TasksService {
         workspaceId: wid, listId: lid, parentTaskId: dto.parentTaskId || null,
         title: dto.title, description: dto.description || null,
         priority: (dto.priority || 'medium') as any,
-        creatorId: member.id, assigneeId: dto.assigneeId || null,
+        creatorId: member.id, assigneeId: dto.assigneeId || member.id,
         source: 'manual' as any,
         startDate: dto.startDate ? new Date(dto.startDate) : null,
         startTime: dto.startTime || null,
