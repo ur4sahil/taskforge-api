@@ -99,16 +99,28 @@ export class ListsService {
     await this.prisma.list.delete({ where: { id: lid } });
   }
 
-  async addMember(lid: string, wmid: string, addedBy: string) {
+  async addMember(lid: string, wmid: string, member: any) {
+    await this.assertCanManageMembers(lid, member);
     return this.prisma.listMember.upsert({
       where: { listId_workspaceMemberId: { listId: lid, workspaceMemberId: wmid } },
-      create: { listId: lid, workspaceMemberId: wmid, addedById: addedBy },
+      create: { listId: lid, workspaceMemberId: wmid, addedById: member.id },
       update: {},
     });
   }
 
-  async removeMember(lid: string, mid: string) {
+  async removeMember(lid: string, mid: string, member: any) {
+    await this.assertCanManageMembers(lid, member);
     await this.prisma.listMember.deleteMany({ where: { listId: lid, workspaceMemberId: mid } });
+  }
+
+  /** Admin can always manage. Non-admin must be the list creator. */
+  private async assertCanManageMembers(lid: string, member: any) {
+    if (member.role === 'admin') return;
+    const list = await this.prisma.list.findUnique({ where: { id: lid }, select: { createdById: true } });
+    if (!list) throw new NotFoundException('List not found');
+    if (list.createdById !== member.id) {
+      throw new ForbiddenException('Only the list creator or an admin can manage members');
+    }
   }
 }
 
@@ -145,17 +157,13 @@ export class ListsController {
   }
 
   @Post(':lid/members')
-  @UseGuards(RolesGuard)
-  @Roles('admin')
   async addMember(@Param('lid') lid: string, @Body() dto: AddListMemberDto, @CurrentMember() m: any) {
-    return successResponse(await this.svc.addMember(lid, dto.workspaceMemberId, m.id));
+    return successResponse(await this.svc.addMember(lid, dto.workspaceMemberId, m));
   }
 
   @Delete(':lid/members/:mid')
-  @UseGuards(RolesGuard)
-  @Roles('admin')
-  async removeMember(@Param('lid') lid: string, @Param('mid') mid: string) {
-    await this.svc.removeMember(lid, mid);
+  async removeMember(@Param('lid') lid: string, @Param('mid') mid: string, @CurrentMember() m: any) {
+    await this.svc.removeMember(lid, mid, m);
     return successResponse({ removed: true });
   }
 }
