@@ -560,6 +560,9 @@ model ConversationMember {
   conversationId    String    @map("conversation_id") @db.Uuid
   workspaceMemberId String    @map("workspace_member_id") @db.Uuid
   lastReadAt        DateTime? @map("last_read_at")
+  // Notifications suppressed until this timestamp (null = not muted).
+  // Far-future value = "muted indefinitely".
+  mutedUntil        DateTime? @map("muted_until")
   joinedAt          DateTime  @default(now()) @map("joined_at")
 
   conversation    Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -576,8 +579,12 @@ model Message {
   senderId       String    @map("sender_id") @db.Uuid
   body           String    @db.Text
   kind           String    @default("text") @db.VarChar(20)
-  // Reply to another message in the same conversation (Slack threads / WhatsApp quote-reply).
+  // Reply to another message in the same conversation.
   replyToId      String?   @map("reply_to_id") @db.Uuid
+  // Original message this one forwards. Points across conversations.
+  forwardedFromId String?  @map("forwarded_from_id") @db.Uuid
+  // Pinned to the top of the conversation (per-conv pin board).
+  isPinned       Boolean   @default(false) @map("is_pinned")
   // Soft-delete: keep the row for thread integrity but blank the body in UI.
   deletedAt      DateTime? @map("deleted_at")
   createdAt      DateTime  @default(now()) @map("created_at")
@@ -587,11 +594,14 @@ model Message {
   sender       WorkspaceMember    @relation("MessageSender", fields: [senderId], references: [id])
   replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
   replies      Message[]          @relation("MessageReply")
+  forwardedFrom Message?          @relation("MessageForward", fields: [forwardedFromId], references: [id], onDelete: SetNull)
+  forwardedAs  Message[]          @relation("MessageForward")
   attachments  Attachment[]
   reactions    MessageReaction[]
 
   @@index([conversationId, createdAt])
   @@index([replyToId])
+  @@index([conversationId, isPinned])
   @@map("messages")
 }
 
