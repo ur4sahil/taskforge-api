@@ -267,10 +267,46 @@ export class MessagesService {
         where: { id: { in: dto.attachmentIds! }, workspaceId: wid, uploadedById: mid, messageId: null },
         data: { messageId: message.id },
       });
-      // Re-fetch with attachments populated.
+    }
+
+    // Parse @email mentions and create Notification rows for any recipient who is also a
+    // participant in this conversation. Fire-and-forget — failure here shouldn't block sending.
+    this.notifyMentions(wid, cid, message.id, mid, body).catch(err => {
+      // eslint-disable-next-line no-console
+      console.error('mention notify failed', err);
+    });
+
+    if (hasAttachments) {
       return this.prisma.message.findUnique({ where: { id: message.id }, include: MESSAGE_INCLUDE });
     }
     return message;
+  }
+
+  /** Pulls @email tokens out of the body, resolves them to conversation participants, and
+   *  inserts mention-type Notification rows. Mirrors the comments module's pattern. */
+  private async notifyMentions(wid: string, cid: string, messageId: string, senderMid: string, body: string) {
+    if (!body) return;
+    const emailRe = /@([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
+    const emails = Array.from(new Set(Array.from(body.matchAll(emailRe), (m: any) => m[1].toLowerCase())));
+    if (emails.length === 0) return;
+    const participants = await this.prisma.conversationMember.findMany({
+      where: { conversationId: cid, workspaceMember: { user: { email: { in: emails } } } },
+      include: { workspaceMember: { include: { user: { select: { email: true, name: true } } } } },
+    });
+    const targets = participants.filter((p: any) => p.workspaceMemberId !== senderMid);
+    if (targets.length === 0) return;
+    const sender = await this.prisma.workspaceMember.findUnique({ where: { id: senderMid }, include: { user: { select: { name: true } } } });
+    const senderName = sender?.user?.name || 'Someone';
+    await this.prisma.notification.createMany({
+      data: targets.map((t: any) => ({
+        workspaceId: wid,
+        recipientId: t.workspaceMemberId,
+        type: 'chat_mention',
+        title: `${senderName} mentioned you`,
+        body: body.length > 140 ? body.slice(0, 137) + '…' : body,
+        data: { conversationId: cid, messageId },
+      })),
+    });
   }
 
   async editMessage(wid: string, cid: string, mid: string, msgId: string, body: string) {

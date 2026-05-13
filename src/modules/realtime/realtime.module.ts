@@ -50,6 +50,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server!: Server;
   private log = new Logger('ChatGateway');
 
+  // Multi-tab presence: count active sockets per member. Member is online iff size > 0.
+  // Map<memberId, Set<socketId>>; keyed by workspaceId for fast workspace-scoped lookups.
+  private presence = new Map<string, Map<string, Set<string>>>();
+
   constructor(
     private jwt: JwtService,
     private config: ConfigService,
@@ -61,21 +65,64 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const auth = await authenticate(socket, this.jwt, this.config, this.prisma);
     if (!auth) return;
     socket.data = auth;
-    // Auto-join every conversation room the user belongs to so they receive new-message
-    // events without having to open each thread first (drives the unread badge in the sidebar).
     const memberships = await this.prisma.conversationMember.findMany({
       where: { workspaceMemberId: auth.workspaceMemberId, conversation: { workspaceId: auth.workspaceId } },
       select: { conversationId: true },
     });
     for (const m of memberships) socket.join(this.roomFor(m.conversationId));
     socket.join(this.presenceRoomFor(auth.workspaceId));
-    this.server.to(this.presenceRoomFor(auth.workspaceId)).emit('presence', { memberId: auth.workspaceMemberId, online: true });
-    this.log.log(`Connected ${auth.workspaceMemberId} (${memberships.length} rooms)`);
+
+    // Register this socket in the multi-tab presence map.
+    const wsMap = this.presence.get(auth.workspaceId) || new Map<string, Set<string>>();
+    if (!this.presence.has(auth.workspaceId)) this.presence.set(auth.workspaceId, wsMap);
+    const wasOffline = !wsMap.has(auth.workspaceMemberId) || wsMap.get(auth.workspaceMemberId)!.size === 0;
+    if (!wsMap.has(auth.workspaceMemberId)) wsMap.set(auth.workspaceMemberId, new Set());
+    wsMap.get(auth.workspaceMemberId)!.add(socket.id);
+    if (wasOffline) {
+      this.server.to(this.presenceRoomFor(auth.workspaceId)).emit('presence:update', {
+        memberId: auth.workspaceMemberId, online: true, at: new Date().toISOString(),
+      });
+    }
+    // Push the full snapshot to the newly-connected socket so it can paint dots immediately.
+    socket.emit('presence:snapshot', { online: Array.from(wsMap.keys()).filter(id => wsMap.get(id)!.size > 0) });
+    this.log.log(`Connected ${auth.workspaceMemberId} (sock=${socket.id}, rooms=${memberships.length})`);
   }
 
   async handleDisconnect(socket: AuthedSocket) {
-    if (!socket.data?.workspaceMemberId) return;
-    this.server.to(this.presenceRoomFor(socket.data.workspaceId!)).emit('presence', { memberId: socket.data.workspaceMemberId, online: false });
+    if (!socket.data?.workspaceMemberId || !socket.data?.workspaceId) return;
+    const wsMap = this.presence.get(socket.data.workspaceId);
+    if (!wsMap) return;
+    const set = wsMap.get(socket.data.workspaceMemberId);
+    if (!set) return;
+    set.delete(socket.id);
+    if (set.size === 0) {
+      wsMap.delete(socket.data.workspaceMemberId);
+      this.server.to(this.presenceRoomFor(socket.data.workspaceId)).emit('presence:update', {
+        memberId: socket.data.workspaceMemberId, online: false, at: new Date().toISOString(),
+      });
+    }
+  }
+
+  /** Client can request current snapshot any time (e.g. after reconnecting). */
+  @SubscribeMessage('presence:request')
+  onPresenceRequest(@ConnectedSocket() socket: AuthedSocket) {
+    if (!socket.data.workspaceId) return;
+    const wsMap = this.presence.get(socket.data.workspaceId);
+    socket.emit('presence:snapshot', { online: wsMap ? Array.from(wsMap.keys()).filter(id => wsMap.get(id)!.size > 0) : [] });
+  }
+
+  /** Mark-read via socket. Broadcasts to the conv room so other participants see read receipts move. */
+  @SubscribeMessage('message:read')
+  async onMarkRead(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string }) {
+    if (!socket.data.workspaceMemberId || !socket.data.workspaceId) return;
+    try {
+      await this.messages.markRead(socket.data.workspaceId, body.conversationId, socket.data.workspaceMemberId);
+      this.server.to(this.roomFor(body.conversationId)).emit('read:update', {
+        conversationId: body.conversationId,
+        memberId: socket.data.workspaceMemberId,
+        lastReadAt: new Date().toISOString(),
+      });
+    } catch {}
   }
 
   /** Client says: "I joined conversation X" — used when a new conversation is created mid-session. */
