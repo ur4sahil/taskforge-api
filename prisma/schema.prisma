@@ -595,7 +595,7 @@ model Message {
   @@map("messages")
 }
 
-/** One row per (message, member, emoji). Multiple emojis from the same user = multiple rows. */
+// One row per (message, member, emoji). Multiple emojis from the same user = multiple rows.
 model MessageReaction {
   id                String   @id @default(uuid()) @db.Uuid
   messageId         String   @map("message_id") @db.Uuid
