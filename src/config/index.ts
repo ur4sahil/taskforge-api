@@ -6,6 +6,7 @@ export const appConfig = registerAs('app', () => ({
   appUrl: process.env.APP_URL || 'http://localhost:3000',
   apiUrl: process.env.API_URL || 'http://localhost:3001',
   inboundEmailDomain: process.env.INBOUND_EMAIL_DOMAIN || 'inbound.taskforge.io',
+  inboundWebhookSecret: process.env.INBOUND_WEBHOOK_SECRET || '',
 }));
 
 export const authConfig = registerAs('auth', () => ({
