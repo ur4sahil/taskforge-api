@@ -1,0 +1,14 @@
+{
+  "name": "taskforge-email-router",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "postal-mime": "^2.2.7"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}
