@@ -16,7 +16,10 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization'],
   });
   app.useGlobalPipes(new ValidationPipe({
-    whitelist: true, forbidNonWhitelisted: true, transform: true,
+    // whitelist strips unknown props silently. forbidNonWhitelisted is OFF because
+    // when a route has multiple @Query() DTOs (e.g. TaskFilterDto + PaginationDto),
+    // each DTO sees the FULL query string and would 400 on the other's properties.
+    whitelist: true, transform: true,
     transformOptions: { enableImplicitConversion: true },
   }));
   app.useGlobalFilters(new HttpExceptionFilter());
