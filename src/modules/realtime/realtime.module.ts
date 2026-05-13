@@ -94,20 +94,25 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     socket.leave(this.roomFor(body.conversationId));
   }
 
+  // Generic relay helper so REST endpoints (edit/delete/react) can broadcast too.
+  emitMessageUpdate(cid: string, msg: any) {
+    this.server?.to(this.roomFor(cid)).emit('message:update', msg);
+  }
+
   /** Send a message AND broadcast it. REST endpoint /messages also exists but socket-send avoids
-   *  the latency of a HTTPS roundtrip when the client already has the socket open. */
+   *  the latency of an HTTPS roundtrip when the client already has the socket open. */
   @SubscribeMessage('message:send')
-  async onSend(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string; body: string }) {
+  async onSend(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string; body: string; attachmentIds?: string[]; replyToId?: string }) {
     if (!socket.data.workspaceMemberId || !socket.data.workspaceId) return;
     try {
       const msg = await this.messages.sendMessage(
         socket.data.workspaceId,
         body.conversationId,
         socket.data.workspaceMemberId,
-        { body: body.body || '' },
+        { body: body.body || '', attachmentIds: body.attachmentIds, replyToId: body.replyToId },
       );
       this.server.to(this.roomFor(body.conversationId)).emit('message:new', msg);
-      return { ok: true, id: msg.id };
+      return { ok: true, id: msg!.id };
     } catch (err: any) {
       return { ok: false, error: err?.message || 'Failed to send' };
     }
