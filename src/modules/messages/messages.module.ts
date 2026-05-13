@@ -31,6 +31,17 @@ export class AddMemberDto {
 export class ReactionDto {
   @IsString() @MaxLength(16) emoji: string = '';
 }
+export class ForwardDto {
+  @IsUUID() toConversationId: string = '';
+  @IsOptional() @IsString() @MaxLength(500) comment?: string;
+}
+export class MuteDto {
+  // ISO timestamp; pass an empty/missing value to unmute.
+  @IsOptional() @IsString() mutedUntil?: string | null;
+}
+export class SearchMessagesDto {
+  @IsString() @IsNotEmpty() @MaxLength(200) q: string = '';
+}
 
 // ───── Shared includes ───────────────────────────────────────────────────────
 
@@ -51,6 +62,12 @@ const MESSAGE_INCLUDE = {
   replyTo: {
     select: {
       id: true, body: true, senderId: true, kind: true, deletedAt: true,
+      sender: { include: MEMBER_INCLUDE },
+    },
+  },
+  forwardedFrom: {
+    select: {
+      id: true, body: true, senderId: true, conversationId: true,
       sender: { include: MEMBER_INCLUDE },
     },
   },
@@ -91,6 +108,7 @@ export class MessagesService {
           memberCount: c.members.length,
           lastMessageAt: c.lastMessageAt,
           createdAt: c.createdAt,
+          mutedUntil: m.mutedUntil,
           // For 1:1 the UI shows the "other" person; for groups it shows c.name and a stack of avatars.
           other: isGroup ? null : (others[0] || null),
           members: c.members.map((cm: any) => cm.workspaceMember),
@@ -352,6 +370,79 @@ export class MessagesService {
     return this.prisma.message.findUnique({ where: { id: msgId }, include: MESSAGE_INCLUDE });
   }
 
+  // ───── Forward / Pin / Mute / Search ───────────────────────────────────────
+
+  /** Forward a message to another conversation. Caller must be a participant of BOTH. */
+  async forwardMessage(wid: string, fromCid: string, msgId: string, toCid: string, mid: string, comment?: string) {
+    await this.assertParticipant(fromCid, mid);
+    await this.assertParticipant(toCid, mid);
+    const src = await this.prisma.message.findUnique({ where: { id: msgId } });
+    if (!src || src.conversationId !== fromCid) throw new NotFoundException('Source message not found');
+    if (src.deletedAt) throw new BadRequestException('Cannot forward a deleted message');
+    // The forward gets the comment as its body (optional) and points back at src via forwardedFromId.
+    // We do NOT copy attachments — they stay on the source. UI shows "Forwarded from X" hint.
+    const [created] = await this.prisma.$transaction([
+      this.prisma.message.create({
+        data: {
+          conversationId: toCid,
+          senderId: mid,
+          body: (comment || '').trim(),
+          kind: 'text',
+          forwardedFromId: msgId,
+        },
+        include: MESSAGE_INCLUDE,
+      }),
+      this.prisma.conversation.update({ where: { id: toCid }, data: { lastMessageAt: new Date() } }),
+    ]);
+    return created;
+  }
+
+  async togglePin(wid: string, cid: string, mid: string, msgId: string) {
+    await this.assertParticipant(cid, mid);
+    const msg = await this.prisma.message.findUnique({ where: { id: msgId } });
+    if (!msg || msg.conversationId !== cid) throw new NotFoundException('Message not found');
+    return this.prisma.message.update({
+      where: { id: msgId },
+      data: { isPinned: !msg.isPinned },
+      include: MESSAGE_INCLUDE,
+    });
+  }
+
+  async listPinnedMessages(wid: string, cid: string, mid: string) {
+    await this.assertParticipant(cid, mid);
+    return this.prisma.message.findMany({
+      where: { conversationId: cid, isPinned: true, deletedAt: null },
+      include: MESSAGE_INCLUDE,
+      orderBy: { createdAt: 'desc' },
+      take: 50,
+    });
+  }
+
+  async setMuted(wid: string, cid: string, mid: string, mutedUntil: string | null | undefined) {
+    await this.assertParticipant(cid, mid);
+    const at = mutedUntil ? new Date(mutedUntil) : null;
+    await this.prisma.conversationMember.update({
+      where: { conversationId_workspaceMemberId: { conversationId: cid, workspaceMemberId: mid } },
+      data: { mutedUntil: at },
+    });
+    return { mutedUntil: at };
+  }
+
+  /** Case-insensitive search within a single conversation; pages of 30. */
+  async searchInConversation(wid: string, cid: string, mid: string, q: string, page = 1, perPage = 30) {
+    await this.assertParticipant(cid, mid);
+    const where = { conversationId: cid, deletedAt: null, body: { contains: q, mode: 'insensitive' as const } };
+    const [messages, total] = await Promise.all([
+      this.prisma.message.findMany({
+        where, include: MESSAGE_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * perPage, take: perPage,
+      }),
+      this.prisma.message.count({ where }),
+    ]);
+    return { messages, meta: paginationMeta(total, page, perPage) };
+  }
+
   // ───── Attachments ─────────────────────────────────────────────────────────
 
   async uploadAttachment(wid: string, cid: string, mid: string, file: any) {
@@ -398,11 +489,14 @@ export class MessagesService {
   async unreadCount(wid: string, mid: string) {
     const memberships = await this.prisma.conversationMember.findMany({
       where: { workspaceMemberId: mid, conversation: { workspaceId: wid } },
-      select: { conversationId: true, lastReadAt: true },
+      select: { conversationId: true, lastReadAt: true, mutedUntil: true },
     });
     if (memberships.length === 0) return 0;
+    const now = new Date();
     let count = 0;
     for (const m of memberships) {
+      // Skip muted conversations entirely.
+      if (m.mutedUntil && m.mutedUntil > now) continue;
       const hasUnread = await this.prisma.message.findFirst({
         where: {
           conversationId: m.conversationId,
@@ -476,6 +570,33 @@ export class MessagesController {
 
   @Delete(':cid/messages/:mid/reactions/:emoji') async unreact(@Param('wid') w: string, @Param('cid') c: string, @Param('mid') id: string, @Param('emoji') emoji: string, @CurrentMember() m: any) {
     return successResponse(await this.svc.removeReaction(w, c, m.id, id, decodeURIComponent(emoji)));
+  }
+
+  @Post(':cid/messages/:mid/forward')
+  async forward(@Param('wid') w: string, @Param('cid') c: string, @Param('mid') id: string, @Body() dto: ForwardDto, @CurrentMember() m: any) {
+    return successResponse(await this.svc.forwardMessage(w, c, id, dto.toConversationId, m.id, dto.comment));
+  }
+
+  @Post(':cid/messages/:mid/pin')
+  async pin(@Param('wid') w: string, @Param('cid') c: string, @Param('mid') id: string, @CurrentMember() m: any) {
+    return successResponse(await this.svc.togglePin(w, c, m.id, id));
+  }
+
+  @Get(':cid/pinned')
+  async pinned(@Param('wid') w: string, @Param('cid') c: string, @CurrentMember() m: any) {
+    return successResponse(await this.svc.listPinnedMessages(w, c, m.id));
+  }
+
+  @Post(':cid/mute')
+  async mute(@Param('wid') w: string, @Param('cid') c: string, @Body() dto: MuteDto, @CurrentMember() m: any) {
+    return successResponse(await this.svc.setMuted(w, c, m.id, dto.mutedUntil));
+  }
+
+  @Get(':cid/search')
+  async search(@Param('wid') w: string, @Param('cid') c: string, @Query('q') q: string, @Query() p: PaginationDto, @CurrentMember() m: any) {
+    if (!q || !q.trim()) return successResponse([], paginationMeta(0, p.page, p.perPage));
+    const r = await this.svc.searchInConversation(w, c, m.id, q.trim(), p.page, p.perPage);
+    return successResponse(r.messages, r.meta);
   }
 
   @Post(':cid/attachments') @UseInterceptors(FileInterceptor('file'))
