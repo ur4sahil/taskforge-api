@@ -111,6 +111,7 @@ model WorkspaceMember {
   auditLogs        AuditLog[]        @relation("AuditActor")
   conversationMemberships ConversationMember[]
   sentMessages     Message[]          @relation("MessageSender")
+  messageReactions MessageReaction[]
 
   @@unique([workspaceId, userId])
   @@index([workspaceId])
@@ -325,8 +326,12 @@ model Mention {
 model Attachment {
   id           String   @id @default(uuid()) @db.Uuid
   workspaceId  String   @map("workspace_id") @db.Uuid
-  taskId       String   @map("task_id") @db.Uuid
+  // Polymorphic: ONE of taskId or messageId is set (UI uses whichever is non-null to
+  // route downloads/permissions). taskId was previously NOT NULL; now nullable so chat
+  // attachments can reuse this table.
+  taskId       String?  @map("task_id") @db.Uuid
   commentId    String?  @map("comment_id") @db.Uuid
+  messageId    String?  @map("message_id") @db.Uuid
   uploadedById String   @map("uploaded_by_id") @db.Uuid
   fileName     String   @map("file_name") @db.VarChar(255)
   fileSize     Int      @map("file_size")
@@ -335,12 +340,14 @@ model Attachment {
   createdAt    DateTime @default(now()) @map("created_at")
 
   workspace  Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  task       Task            @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  task       Task?           @relation(fields: [taskId], references: [id], onDelete: Cascade)
   comment    Comment?        @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  message    Message?        @relation(fields: [messageId], references: [id], onDelete: Cascade)
   uploadedBy WorkspaceMember @relation("AttachmentUploader", fields: [uploadedById], references: [id])
 
   @@index([taskId])
   @@index([commentId])
+  @@index([messageId])
   @@map("attachments")
 }
 
@@ -534,6 +541,8 @@ model AuditLog {
 model Conversation {
   id            String    @id @default(uuid()) @db.Uuid
   workspaceId   String    @map("workspace_id") @db.Uuid
+  // Null for 1:1 DMs (UI derives the title from the other member). Set for groups.
+  name          String?   @db.VarChar(120)
   createdAt     DateTime  @default(now()) @map("created_at")
   lastMessageAt DateTime? @map("last_message_at")
 
@@ -567,12 +576,37 @@ model Message {
   senderId       String    @map("sender_id") @db.Uuid
   body           String    @db.Text
   kind           String    @default("text") @db.VarChar(20)
+  // Reply to another message in the same conversation (Slack threads / WhatsApp quote-reply).
+  replyToId      String?   @map("reply_to_id") @db.Uuid
+  // Soft-delete: keep the row for thread integrity but blank the body in UI.
+  deletedAt      DateTime? @map("deleted_at")
   createdAt      DateTime  @default(now()) @map("created_at")
   editedAt       DateTime? @map("edited_at")
 
-  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       WorkspaceMember @relation("MessageSender", fields: [senderId], references: [id])
+  conversation Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       WorkspaceMember    @relation("MessageSender", fields: [senderId], references: [id])
+  replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies      Message[]          @relation("MessageReply")
+  attachments  Attachment[]
+  reactions    MessageReaction[]
 
   @@index([conversationId, createdAt])
+  @@index([replyToId])
   @@map("messages")
+}
+
+/** One row per (message, member, emoji). Multiple emojis from the same user = multiple rows. */
+model MessageReaction {
+  id                String   @id @default(uuid()) @db.Uuid
+  messageId         String   @map("message_id") @db.Uuid
+  workspaceMemberId String   @map("workspace_member_id") @db.Uuid
+  emoji             String   @db.VarChar(16)
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  message         Message         @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  workspaceMember WorkspaceMember @relation(fields: [workspaceMemberId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, workspaceMemberId, emoji])
+  @@index([messageId])
+  @@map("message_reactions")
 }
