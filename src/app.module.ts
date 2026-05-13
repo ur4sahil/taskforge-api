@@ -22,6 +22,8 @@ import { AiModule } from './modules/ai/ai.module';
 import { AuditModule } from './modules/audit/audit.module';
 import { TrashModule } from './modules/trash/trash.module';
 import { EmailIngestionModule } from './modules/email-ingestion/email-ingestion.module';
+import { MessagesModule } from './modules/messages/messages.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
 import { WorkersModule } from './workers/workers.module';
 import { JwtAuthGuard } from './common/guards';
 
@@ -46,7 +48,7 @@ import { JwtAuthGuard } from './common/guards';
     AuthModule, WorkspacesModule, ListsModule, TasksModule, CommentsModule,
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,
     NotificationsModule, SearchModule, ViewsModule, ReportsModule,
-    AiModule, AuditModule, TrashModule, EmailIngestionModule, WorkersModule,
+    AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, RealtimeModule, WorkersModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
