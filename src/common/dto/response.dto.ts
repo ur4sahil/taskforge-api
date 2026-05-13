@@ -3,7 +3,7 @@ import { Type } from 'class-transformer';
 
 export class PaginationDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) page: number = 1;
-  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) perPage: number = 25;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(500) perPage: number = 25;
 }
 
 export interface PaginationMeta {
