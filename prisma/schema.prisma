@@ -72,6 +72,7 @@ model Workspace {
   savedViews      SavedView[]
   auditLogs       AuditLog[]
   recurrenceRules RecurrenceRule[]
+  conversations   Conversation[]
 
   @@map("workspaces")
 }
@@ -108,6 +109,8 @@ model WorkspaceMember {
   createdTemplates Template[]
   createdViews     SavedView[]
   auditLogs        AuditLog[]        @relation("AuditActor")
+  conversationMemberships ConversationMember[]
+  sentMessages     Message[]          @relation("MessageSender")
 
   @@unique([workspaceId, userId])
   @@index([workspaceId])
@@ -526,4 +529,50 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([actorId])
   @@map("audit_logs")
+}
+
+model Conversation {
+  id            String    @id @default(uuid()) @db.Uuid
+  workspaceId   String    @map("workspace_id") @db.Uuid
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastMessageAt DateTime? @map("last_message_at")
+
+  workspace Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  members   ConversationMember[]
+  messages  Message[]
+
+  @@index([workspaceId])
+  @@index([lastMessageAt])
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id                String    @id @default(uuid()) @db.Uuid
+  conversationId    String    @map("conversation_id") @db.Uuid
+  workspaceMemberId String    @map("workspace_member_id") @db.Uuid
+  lastReadAt        DateTime? @map("last_read_at")
+  joinedAt          DateTime  @default(now()) @map("joined_at")
+
+  conversation    Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  workspaceMember WorkspaceMember @relation(fields: [workspaceMemberId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, workspaceMemberId])
+  @@index([workspaceMemberId])
+  @@map("conversation_members")
+}
+
+model Message {
+  id             String    @id @default(uuid()) @db.Uuid
+  conversationId String    @map("conversation_id") @db.Uuid
+  senderId       String    @map("sender_id") @db.Uuid
+  body           String    @db.Text
+  kind           String    @default("text") @db.VarChar(20)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  editedAt       DateTime? @map("edited_at")
+
+  conversation Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       WorkspaceMember @relation("MessageSender", fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
 }
