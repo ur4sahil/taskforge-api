@@ -190,9 +190,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   cors: { origin: process.env.APP_URL || 'http://localhost:3000', credentials: true },
 })
 @Injectable()
-export class CallGateway implements OnGatewayConnection {
+export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server!: Server;
   private log = new Logger('CallGateway');
+
+  // Active group call rooms: Map<conversationId, Set<workspaceMemberId>>. Mesh topology
+  // — every member has a peer connection to every other member. Capped at MAX_PARTICIPANTS.
+  private rooms = new Map<string, Set<string>>();
+  private static readonly MAX_PARTICIPANTS = 6;
 
   constructor(
     private jwt: JwtService,
@@ -205,9 +210,77 @@ export class CallGateway implements OnGatewayConnection {
     const auth = await authenticate(socket, this.jwt, this.config, this.prisma);
     if (!auth) return;
     socket.data = auth;
-    // Personal room — addressable by member id, used so the invite from caller → server → callee
-    // can target the specific person regardless of how many sockets they have open.
     socket.join(this.memberRoom(auth.workspaceMemberId));
+  }
+
+  async handleDisconnect(socket: AuthedSocket) {
+    if (!socket.data?.workspaceMemberId) return;
+    // Drop this member from any rooms they were in (best-effort — they could have multiple
+    // sockets; we still treat any disconnect as a leave so other peers tear down the PC).
+    for (const [cid, members] of this.rooms.entries()) {
+      if (members.has(socket.data.workspaceMemberId)) {
+        members.delete(socket.data.workspaceMemberId);
+        if (members.size === 0) this.rooms.delete(cid);
+        this.server.to(this.callRoom(cid)).emit('call:peer-leave', {
+          conversationId: cid, memberId: socket.data.workspaceMemberId,
+        });
+      }
+    }
+  }
+
+  /** Group call: caller (or any participant) joins the room. Returns the current roster so
+   *  the newly-joined client can initiate a peer connection to each existing participant. */
+  @SubscribeMessage('call:room-join')
+  async onRoomJoin(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string }) {
+    if (!socket.data.workspaceMemberId || !socket.data.workspaceId) return { ok: false };
+    // Verify participant in the conversation.
+    const cm = await this.prisma.conversationMember.findUnique({
+      where: { conversationId_workspaceMemberId: { conversationId: body.conversationId, workspaceMemberId: socket.data.workspaceMemberId } },
+    });
+    if (!cm) return { ok: false, error: 'Not a participant' };
+
+    const set = this.rooms.get(body.conversationId) || new Set<string>();
+    if (!this.rooms.has(body.conversationId)) this.rooms.set(body.conversationId, set);
+    if (set.size >= CallGateway.MAX_PARTICIPANTS && !set.has(socket.data.workspaceMemberId)) {
+      return { ok: false, error: `Call is full (max ${CallGateway.MAX_PARTICIPANTS})` };
+    }
+    const existing = Array.from(set).filter(id => id !== socket.data.workspaceMemberId);
+    set.add(socket.data.workspaceMemberId);
+    socket.join(this.callRoom(body.conversationId));
+
+    // Tell everyone else: a new peer joined.
+    this.server.to(this.callRoom(body.conversationId)).emit('call:peer-join', {
+      conversationId: body.conversationId,
+      memberId: socket.data.workspaceMemberId,
+    });
+    // First joiner writes a call-start system message.
+    if (set.size === 1) {
+      await this.messages.sendMessage(
+        socket.data.workspaceId, body.conversationId, socket.data.workspaceMemberId,
+        { body: 'Call started' }, 'call-start',
+      ).catch(() => {});
+    }
+    return { ok: true, peers: existing };
+  }
+
+  @SubscribeMessage('call:room-leave')
+  async onRoomLeave(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string; durationSec?: number }) {
+    if (!socket.data.workspaceMemberId || !socket.data.workspaceId) return;
+    const set = this.rooms.get(body.conversationId);
+    if (!set) return;
+    set.delete(socket.data.workspaceMemberId);
+    socket.leave(this.callRoom(body.conversationId));
+    this.server.to(this.callRoom(body.conversationId)).emit('call:peer-leave', {
+      conversationId: body.conversationId, memberId: socket.data.workspaceMemberId,
+    });
+    if (set.size === 0) {
+      this.rooms.delete(body.conversationId);
+      const note = body.durationSec ? `Call ended (${Math.floor(body.durationSec / 60)}m ${body.durationSec % 60}s)` : 'Call ended';
+      await this.messages.sendMessage(
+        socket.data.workspaceId, body.conversationId, socket.data.workspaceMemberId,
+        { body: note }, 'call-end',
+      ).catch(() => {});
+    }
   }
 
   /** Caller starts the call. We notify the target's personal room.
@@ -288,6 +361,7 @@ export class CallGateway implements OnGatewayConnection {
   }
 
   private memberRoom(mid: string) { return `mem:${mid}`; }
+  private callRoom(cid: string) { return `call:${cid}`; }
 }
 
 @Module({

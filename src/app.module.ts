@@ -3,7 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
-import { appConfig, authConfig, redisConfig, storageConfig, aiConfig } from './config';
+import { appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig } from './config';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module';
@@ -23,13 +23,14 @@ import { AuditModule } from './modules/audit/audit.module';
 import { TrashModule } from './modules/trash/trash.module';
 import { EmailIngestionModule } from './modules/email-ingestion/email-ingestion.module';
 import { MessagesModule } from './modules/messages/messages.module';
+import { PushModule } from './modules/push/push.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { WorkersModule } from './workers/workers.module';
 import { JwtAuthGuard } from './common/guards';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig] }),
+    ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig] }),
     ThrottlerModule.forRoot([{ name: 'default', ttl: 60000, limit: 100 }]),
     BullModule.forRootAsync({
       useFactory: () => {
@@ -48,7 +49,7 @@ import { JwtAuthGuard } from './common/guards';
     AuthModule, WorkspacesModule, ListsModule, TasksModule, CommentsModule,
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,
     NotificationsModule, SearchModule, ViewsModule, ReportsModule,
-    AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, RealtimeModule, WorkersModule,
+    AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, PushModule, RealtimeModule, WorkersModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

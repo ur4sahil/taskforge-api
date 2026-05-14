@@ -7,6 +7,8 @@ import { CurrentMember } from '../../common/decorators';
 import { WorkspaceGuard } from '../../common/guards';
 import { successResponse, PaginationDto, paginationMeta } from '../../common/dto/response.dto';
 import { R2StorageService } from '../../common/utils/r2-storage';
+import { extractFirstUrl, fetchLinkPreview } from '../../common/utils/unfurl';
+import { PushModule, PushService } from '../push/push.module';
 
 // ───── DTOs ──────────────────────────────────────────────────────────────────
 
@@ -77,7 +79,7 @@ const MESSAGE_INCLUDE = {
 
 @Injectable()
 export class MessagesService {
-  constructor(private prisma: PrismaService, private storage: R2StorageService) {}
+  constructor(private prisma: PrismaService, private storage: R2StorageService, private push: PushService) {}
 
   async listConversations(wid: string, mid: string) {
     const memberships = await this.prisma.conversationMember.findMany({
@@ -294,6 +296,19 @@ export class MessagesService {
       console.error('mention notify failed', err);
     });
 
+    // Fetch + attach a link preview for the first URL in the body. Best-effort, never blocks.
+    this.attachLinkPreview(message.id, body).catch(err => {
+      // eslint-disable-next-line no-console
+      console.error('unfurl failed', err);
+    });
+
+    // Push to all other participants (those not actively viewing the conv aren't filtered here
+    // — that's a client-side concern; we just deliver to every device the recipient has).
+    this.pushNewMessage(wid, cid, message.id, mid, body || '(attachment)').catch(err => {
+      // eslint-disable-next-line no-console
+      console.error('push send failed', err);
+    });
+
     if (hasAttachments) {
       return this.prisma.message.findUnique({ where: { id: message.id }, include: MESSAGE_INCLUDE });
     }
@@ -324,6 +339,38 @@ export class MessagesService {
         body: body.length > 140 ? body.slice(0, 137) + '…' : body,
         data: { conversationId: cid, messageId },
       })),
+    });
+  }
+
+  private async attachLinkPreview(messageId: string, body: string) {
+    if (!body) return;
+    const url = extractFirstUrl(body);
+    if (!url) return;
+    const preview = await fetchLinkPreview(url);
+    if (!preview) return;
+    await this.prisma.message.update({ where: { id: messageId }, data: { linkPreview: preview as any } });
+  }
+
+  /** Send a web push notification to every conversation participant except the sender. */
+  private async pushNewMessage(wid: string, cid: string, messageId: string, senderId: string, snippet: string) {
+    const recipients = await this.prisma.conversationMember.findMany({
+      where: { conversationId: cid, workspaceMemberId: { not: senderId } },
+      select: { workspaceMemberId: true, mutedUntil: true },
+    });
+    const now = new Date();
+    const ids = recipients
+      .filter(r => !r.mutedUntil || r.mutedUntil < now)
+      .map(r => r.workspaceMemberId);
+    if (ids.length === 0) return;
+    const sender = await this.prisma.workspaceMember.findUnique({ where: { id: senderId }, include: { user: { select: { name: true } } } });
+    const conv = await this.prisma.conversation.findUnique({ where: { id: cid }, select: { name: true } });
+    const title = conv?.name ? conv.name : (sender?.user?.name || 'New message');
+    await this.push.sendToMany(ids, {
+      title,
+      body: snippet.length > 140 ? snippet.slice(0, 137) + '…' : snippet,
+      tag: `conv-${cid}`,
+      url: `/messages?conv=${cid}`,
+      data: { conversationId: cid, messageId },
     });
   }
 
@@ -615,6 +662,7 @@ export class MessagesController {
 }
 
 @Module({
+  imports: [PushModule],
   controllers: [MessagesController],
   providers: [MessagesService, R2StorageService],
   exports: [MessagesService],

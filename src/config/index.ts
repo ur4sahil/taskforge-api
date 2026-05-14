@@ -9,6 +9,12 @@ export const appConfig = registerAs('app', () => ({
   inboundWebhookSecret: process.env.INBOUND_WEBHOOK_SECRET || '',
 }));
 
+export const pushConfig = registerAs('push', () => ({
+  vapidPublic: process.env.VAPID_PUBLIC_KEY || '',
+  vapidPrivate: process.env.VAPID_PRIVATE_KEY || '',
+  vapidSubject: process.env.VAPID_SUBJECT || 'mailto:noreply@taskforge.local',
+}));
+
 export const authConfig = registerAs('auth', () => ({
   jwtAccessSecret: process.env.JWT_ACCESS_SECRET || 'dev-access-secret',
   jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret',
