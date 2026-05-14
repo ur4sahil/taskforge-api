@@ -3,6 +3,7 @@ import { BullModule, InjectQueue } from '@nestjs/bullmq';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsModule, NotificationsService } from '../modules/notifications/notifications.module';
 
 @Processor('recurring-tasks')
 export class RecurringTaskProcessor extends WorkerHost {
@@ -28,25 +29,82 @@ export class RecurringTaskProcessor extends WorkerHost {
 @Processor('reminders')
 export class ReminderProcessor extends WorkerHost {
   private log = new Logger('Reminders');
-  constructor(private prisma: PrismaService) { super(); }
+  constructor(private prisma: PrismaService, private notifications: NotificationsService) { super(); }
   async process(job: Job) {
-    const pending = await this.prisma.reminder.findMany({ where: { isFired: false, isDismissed: false, OR: [{ nextFireTime: { lte: new Date() } }, { snoozedUntil: { lte: new Date() } }] }, include: { task: true } });
+    const pending = await this.prisma.reminder.findMany({
+      where: { isFired: false, isDismissed: false, OR: [{ nextFireTime: { lte: new Date() } }, { snoozedUntil: { lte: new Date() } }] },
+      include: { task: { select: { id: true, title: true, workspaceId: true, dueDate: true } } },
+    });
     for (const r of pending) {
-      this.log.log(`Firing reminder ${r.id} for "${r.task.title}"`);
       await this.prisma.reminder.update({ where: { id: r.id }, data: { isFired: true, snoozedUntil: null } });
+      if (!r.task) continue;
+      const due = r.task.dueDate ? new Date(r.task.dueDate) : null;
+      const dueIn = due ? Math.round((due.getTime() - Date.now()) / 60000) : null;
+      const body = due
+        ? (dueIn != null && dueIn > 0 ? `Due in ${formatMinutes(dueIn)}` : 'Due now')
+        : 'Reminder';
+      await this.notifications.dispatch({
+        workspaceId: r.task.workspaceId,
+        recipientMemberId: r.workspaceMemberId,
+        channel: 'reminder',
+        type: 'reminder',
+        title: r.task.title,
+        body,
+        url: `/?task=${r.task.id}`,
+        entityType: 'task',
+        entityId: r.task.id,
+        suppressIfActiveScreen: `task:${r.task.id}`,
+        pushTag: `reminder:${r.task.id}`,
+      });
+      this.log.log(`Fired reminder ${r.id} → member ${r.workspaceMemberId}`);
     }
   }
+}
+
+function formatMinutes(m: number): string {
+  if (m < 60) return `${m}m`;
+  if (m < 60 * 24) return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / 60 / 24)}d`;
 }
 
 @Processor('overdue-check')
 export class OverdueProcessor extends WorkerHost {
   private log = new Logger('Overdue');
-  constructor(private prisma: PrismaService) { super(); }
+  constructor(private prisma: PrismaService, private notifications: NotificationsService) { super(); }
   async process(job: Job) {
-    const overdue = await this.prisma.task.findMany({ where: { status: { not: 'done' }, dueDate: { lt: new Date() }, deletedAt: null } });
+    // Notify once per task per day. We rely on the 'overdue' notification.type with a date stamp
+    // in metadata to dedupe — checked before dispatching.
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const overdue = await this.prisma.task.findMany({
+      where: { status: { not: 'done' }, dueDate: { lt: new Date() }, deletedAt: null },
+      select: { id: true, title: true, workspaceId: true, assigneeId: true, dueDate: true },
+    });
     for (const t of overdue) {
-      const hrs = (Date.now() - (t.dueDate?.getTime() || 0)) / 3600000;
-      this.log.log(`Task ${t.id} overdue ${Math.round(hrs)}h`);
+      if (!t.assigneeId) continue;
+      const already = await this.prisma.notification.findFirst({
+        where: {
+          workspaceId: t.workspaceId, recipientId: t.assigneeId, type: 'overdue',
+          createdAt: { gte: new Date(todayKey) },
+          data: { path: ['entityId'], equals: t.id },
+        },
+        select: { id: true },
+      });
+      if (already) continue;
+      const hrs = Math.round((Date.now() - (t.dueDate?.getTime() || 0)) / 3600000);
+      await this.notifications.dispatch({
+        workspaceId: t.workspaceId,
+        recipientMemberId: t.assigneeId,
+        channel: 'overdue',
+        type: 'overdue',
+        title: 'Task overdue',
+        body: `${t.title} — ${hrs}h late`,
+        url: `/?task=${t.id}`,
+        entityType: 'task',
+        entityId: t.id,
+        suppressIfActiveScreen: `task:${t.id}`,
+        pushTag: `overdue:${t.id}`,
+      });
+      this.log.log(`Notified overdue: ${t.id} → ${t.assigneeId}`);
     }
   }
 }
@@ -114,6 +172,7 @@ export class WorkerScheduler implements OnApplicationBootstrap {
 
 @Module({
   imports: [
+    NotificationsModule,
     BullModule.registerQueue(
       { name: 'recurring-tasks' },
       { name: 'reminders' },

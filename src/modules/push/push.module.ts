@@ -82,16 +82,19 @@ export class PushService implements OnModuleInit {
     await this.prisma.pushSubscription.deleteMany({ where: { endpoint } });
   }
 
-  /** Fire a notification to every device the member has subscribed. Stale subs (410 Gone) are pruned. */
-  async sendTo(memberId: string, payload: PushPayload) {
+  /** Fire a notification to every device the member has subscribed. Stale subs (410 Gone) are pruned.
+   *  `urgency`: 'high' for call-style (immediate wake), 'normal' for everything else. iOS in particular
+   *  needs urgency:'high' to ring the device when the PWA is fully closed. */
+  async sendTo(memberId: string, payload: PushPayload, urgency: 'normal' | 'high' = 'normal') {
     if (!this.configured) return;
     const subs = await this.prisma.pushSubscription.findMany({ where: { workspaceMemberId: memberId } });
     if (subs.length === 0) return;
     const body = JSON.stringify(payload);
     const stale: string[] = [];
+    const opts: any = { TTL: urgency === 'high' ? 30 : 60, urgency };
     await Promise.all(subs.map(async s => {
       try {
-        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.authKey } }, body, { TTL: 60 });
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.authKey } }, body, opts);
       } catch (err: any) {
         if (err?.statusCode === 410 || err?.statusCode === 404) stale.push(s.endpoint);
         else this.log.warn(`Push send failed (${err?.statusCode}): ${err?.message}`);
@@ -103,8 +106,13 @@ export class PushService implements OnModuleInit {
     }
   }
 
-  async sendToMany(memberIds: string[], payload: PushPayload) {
-    await Promise.all(memberIds.map(id => this.sendTo(id, payload)));
+  /** Alias used by NotificationsService.dispatch() — clearer call site. */
+  async sendToMember(memberId: string, payload: PushPayload, urgency: 'normal' | 'high' = 'normal') {
+    return this.sendTo(memberId, payload, urgency);
+  }
+
+  async sendToMany(memberIds: string[], payload: PushPayload, urgency: 'normal' | 'high' = 'normal') {
+    await Promise.all(memberIds.map(id => this.sendTo(id, payload, urgency)));
   }
 }
 
@@ -129,6 +137,18 @@ export class PushController {
   @Delete('subscribe')
   async unsubscribe(@Body() dto: PushUnsubscribeDto) {
     await this.svc.unsubscribe(dto.endpoint);
+    return successResponse({ ok: true });
+  }
+
+  /** Sends a test notification to the current member — used by the Settings panel's "Send test" button. */
+  @Post('test')
+  async test(@CurrentMember() m: any) {
+    await this.svc.sendToMember(m.id, {
+      title: 'TaskForge test notification',
+      body: 'If you see this, push is working on this device.',
+      url: '/',
+      tag: 'test',
+    });
     return successResponse({ ok: true });
   }
 }

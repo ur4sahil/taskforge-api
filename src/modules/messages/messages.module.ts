@@ -9,6 +9,7 @@ import { successResponse, PaginationDto, paginationMeta } from '../../common/dto
 import { R2StorageService } from '../../common/utils/r2-storage';
 import { extractFirstUrl, fetchLinkPreview } from '../../common/utils/unfurl';
 import { PushModule, PushService } from '../push/push.module';
+import { NotificationsModule, NotificationsService } from '../notifications/notifications.module';
 
 // ───── DTOs ──────────────────────────────────────────────────────────────────
 
@@ -79,7 +80,12 @@ const MESSAGE_INCLUDE = {
 
 @Injectable()
 export class MessagesService {
-  constructor(private prisma: PrismaService, private storage: R2StorageService, private push: PushService) {}
+  constructor(
+    private prisma: PrismaService,
+    private storage: R2StorageService,
+    private push: PushService,
+    private notifications: NotificationsService,
+  ) {}
 
   async listConversations(wid: string, mid: string) {
     const memberships = await this.prisma.conversationMember.findMany({
@@ -289,25 +295,15 @@ export class MessagesService {
       });
     }
 
-    // Parse @email mentions and create Notification rows for any recipient who is also a
-    // participant in this conversation. Fire-and-forget — failure here shouldn't block sending.
-    this.notifyMentions(wid, cid, message.id, mid, body).catch(err => {
-      // eslint-disable-next-line no-console
-      console.error('mention notify failed', err);
-    });
-
-    // Fetch + attach a link preview for the first URL in the body. Best-effort, never blocks.
-    this.attachLinkPreview(message.id, body).catch(err => {
-      // eslint-disable-next-line no-console
-      console.error('unfurl failed', err);
-    });
-
-    // Push to all other participants (those not actively viewing the conv aren't filtered here
-    // — that's a client-side concern; we just deliver to every device the recipient has).
-    this.pushNewMessage(wid, cid, message.id, mid, body || '(attachment)').catch(err => {
-      // eslint-disable-next-line no-console
-      console.error('push send failed', err);
-    });
+    // Notify participants via the central dispatch (handles prefs + active-screen suppression + push).
+    // Mentions take priority over plain-chat notifications — mentioned users get the @ notification
+    // and are excluded from the chat-channel fan-out, so they don't get two pushes.
+    if (kind === 'text') {
+      this.attachLinkPreview(message.id, body).catch(() => {});
+      this.notifyParticipants(wid, cid, message.id, mid, body || '(attachment)').catch(err => {
+        console.error('notify failed', err);
+      });
+    }
 
     if (hasAttachments) {
       return this.prisma.message.findUnique({ where: { id: message.id }, include: MESSAGE_INCLUDE });
@@ -317,31 +313,6 @@ export class MessagesService {
 
   /** Pulls @email tokens out of the body, resolves them to conversation participants, and
    *  inserts mention-type Notification rows. Mirrors the comments module's pattern. */
-  private async notifyMentions(wid: string, cid: string, messageId: string, senderMid: string, body: string) {
-    if (!body) return;
-    const emailRe = /@([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
-    const emails = Array.from(new Set(Array.from(body.matchAll(emailRe), (m: any) => m[1].toLowerCase())));
-    if (emails.length === 0) return;
-    const participants = await this.prisma.conversationMember.findMany({
-      where: { conversationId: cid, workspaceMember: { user: { email: { in: emails } } } },
-      include: { workspaceMember: { include: { user: { select: { email: true, name: true } } } } },
-    });
-    const targets = participants.filter((p: any) => p.workspaceMemberId !== senderMid);
-    if (targets.length === 0) return;
-    const sender = await this.prisma.workspaceMember.findUnique({ where: { id: senderMid }, include: { user: { select: { name: true } } } });
-    const senderName = sender?.user?.name || 'Someone';
-    await this.prisma.notification.createMany({
-      data: targets.map((t: any) => ({
-        workspaceId: wid,
-        recipientId: t.workspaceMemberId,
-        type: 'chat_mention',
-        title: `${senderName} mentioned you`,
-        body: body.length > 140 ? body.slice(0, 137) + '…' : body,
-        data: { conversationId: cid, messageId },
-      })),
-    });
-  }
-
   private async attachLinkPreview(messageId: string, body: string) {
     if (!body) return;
     const url = extractFirstUrl(body);
@@ -351,27 +322,58 @@ export class MessagesService {
     await this.prisma.message.update({ where: { id: messageId }, data: { linkPreview: preview as any } });
   }
 
-  /** Send a web push notification to every conversation participant except the sender. */
-  private async pushNewMessage(wid: string, cid: string, messageId: string, senderId: string, snippet: string) {
+  /** One pass over participants: dispatch a 'mention' to anyone @-tagged, then a plain 'chat'
+   *  to everyone else. Per-conversation mute (mutedUntil) is honored here so the user's "mute
+   *  this conv" toggle takes precedence over their global prefs. */
+  private async notifyParticipants(wid: string, cid: string, messageId: string, senderMid: string, snippet: string) {
     const recipients = await this.prisma.conversationMember.findMany({
-      where: { conversationId: cid, workspaceMemberId: { not: senderId } },
-      select: { workspaceMemberId: true, mutedUntil: true },
+      where: { conversationId: cid, workspaceMemberId: { not: senderMid } },
+      include: { workspaceMember: { include: { user: { select: { id: true, email: true, name: true } } } } },
     });
     const now = new Date();
-    const ids = recipients
-      .filter(r => !r.mutedUntil || r.mutedUntil < now)
-      .map(r => r.workspaceMemberId);
-    if (ids.length === 0) return;
-    const sender = await this.prisma.workspaceMember.findUnique({ where: { id: senderId }, include: { user: { select: { name: true } } } });
-    const conv = await this.prisma.conversation.findUnique({ where: { id: cid }, select: { name: true } });
-    const title = conv?.name ? conv.name : (sender?.user?.name || 'New message');
-    await this.push.sendToMany(ids, {
-      title,
-      body: snippet.length > 140 ? snippet.slice(0, 137) + '…' : snippet,
-      tag: `conv-${cid}`,
-      url: `/messages?conv=${cid}`,
-      data: { conversationId: cid, messageId },
+    const live = recipients.filter(r => !r.mutedUntil || r.mutedUntil < now);
+    if (live.length === 0) return;
+
+    const sender = await this.prisma.workspaceMember.findUnique({
+      where: { id: senderMid }, include: { user: { select: { name: true } } },
     });
+    const senderName = sender?.user?.name || 'Someone';
+    const conv = await this.prisma.conversation.findUnique({ where: { id: cid }, select: { name: true } });
+    const groupName = conv?.name;
+    const isGroup = !!groupName;
+
+    // Resolve mentioned emails → workspaceMemberIds.
+    const emailRe = /@([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g;
+    const emails = Array.from(new Set(Array.from(snippet.matchAll(emailRe), (m: any) => m[1].toLowerCase())));
+    const mentionedIds = new Set<string>(
+      emails.length === 0 ? [] :
+      live.filter(r => r.workspaceMember?.user?.email && emails.includes(r.workspaceMember.user.email.toLowerCase()))
+          .map(r => r.workspaceMemberId)
+    );
+
+    const truncate = (s: string) => s.length > 140 ? s.slice(0, 137) + '…' : s;
+    const url = `/messages?c=${cid}`;
+    const screen = `messages:${cid}`;
+    const tag = `msg:${cid}`;
+
+    await Promise.all(live.map(r => {
+      const isMention = mentionedIds.has(r.workspaceMemberId);
+      return this.notifications.dispatch({
+        workspaceId: wid,
+        recipientMemberId: r.workspaceMemberId,
+        channel: isMention ? 'mention' : 'chat',
+        type: isMention ? 'chat_mention' : 'chat_message',
+        title: isMention
+          ? `${senderName} mentioned you`
+          : (isGroup ? `${groupName} · ${senderName}` : senderName),
+        body: truncate(snippet),
+        url,
+        entityType: 'message',
+        entityId: messageId,
+        suppressIfActiveScreen: screen,
+        pushTag: tag,
+      });
+    }));
   }
 
   async editMessage(wid: string, cid: string, mid: string, msgId: string, body: string) {
@@ -662,7 +664,7 @@ export class MessagesController {
 }
 
 @Module({
-  imports: [PushModule],
+  imports: [PushModule, NotificationsModule],
   controllers: [MessagesController],
   providers: [MessagesService, R2StorageService],
   exports: [MessagesService],

@@ -9,6 +9,8 @@ import { Server, Socket } from 'socket.io';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthModule } from '../auth/auth.module';
 import { MessagesModule, MessagesService } from '../messages/messages.module';
+import { PresenceModule, PresenceService } from '../presence/presence.module';
+import { NotificationsModule, NotificationsService } from '../notifications/notifications.module';
 
 /** Connection state we hang off the socket so per-event handlers don't re-decode JWT. */
 interface AuthedSocket extends Socket {
@@ -59,9 +61,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private config: ConfigService,
     private prisma: PrismaService,
     private messages: MessagesService,
+    private presenceSvc: PresenceService,
   ) {}
 
   async handleConnection(socket: AuthedSocket) {
+    // PresenceService keeps a single Server reference so other services can emit per-member.
+    // Set on the first connection (afterInit isn't reliably available across NestJS versions).
+    if (this.server) this.presenceSvc.registerChatServer(this.server);
     const auth = await authenticate(socket, this.jwt, this.config, this.prisma);
     if (!auth) return;
     socket.data = auth;
@@ -71,6 +77,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
     for (const m of memberships) socket.join(this.roomFor(m.conversationId));
     socket.join(this.presenceRoomFor(auth.workspaceId));
+    // Personal room — used by NotificationsService.dispatch and CallGateway to target this member.
+    socket.join(`mem:${auth.workspaceMemberId}`);
 
     // Register this socket in the multi-tab presence map.
     const wsMap = this.presence.get(auth.workspaceId) || new Map<string, Set<string>>();
@@ -78,6 +86,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const wasOffline = !wsMap.has(auth.workspaceMemberId) || wsMap.get(auth.workspaceMemberId)!.size === 0;
     if (!wsMap.has(auth.workspaceMemberId)) wsMap.set(auth.workspaceMemberId, new Set());
     wsMap.get(auth.workspaceMemberId)!.add(socket.id);
+    this.presenceSvc.addSocket(auth.workspaceMemberId, socket.id);
     if (wasOffline) {
       this.server.to(this.presenceRoomFor(auth.workspaceId)).emit('presence:update', {
         memberId: auth.workspaceMemberId, online: true, at: new Date().toISOString(),
@@ -90,6 +99,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleDisconnect(socket: AuthedSocket) {
     if (!socket.data?.workspaceMemberId || !socket.data?.workspaceId) return;
+    this.presenceSvc.removeSocket(socket.data.workspaceMemberId, socket.id);
     const wsMap = this.presence.get(socket.data.workspaceId);
     if (!wsMap) return;
     const set = wsMap.get(socket.data.workspaceMemberId);
@@ -101,6 +111,14 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         memberId: socket.data.workspaceMemberId, online: false, at: new Date().toISOString(),
       });
     }
+  }
+
+  /** Client tells us which screen is foregrounded so dispatch can suppress redundant pushes.
+   *  Conventions: `messages:<conversationId>`, `task:<taskId>`, `list:<listId>`, `notifications`, etc. */
+  @SubscribeMessage('presence:screen')
+  onPresenceScreen(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { screen: string }) {
+    if (!socket.data?.workspaceMemberId) return;
+    this.presenceSvc.setScreen(socket.data.workspaceMemberId, body?.screen || '');
   }
 
   /** Client can request current snapshot any time (e.g. after reconnecting). */
@@ -204,6 +222,7 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private config: ConfigService,
     private prisma: PrismaService,
     private messages: MessagesService,
+    private notifications: NotificationsService,
   ) {}
 
   async handleConnection(socket: AuthedSocket) {
@@ -305,6 +324,27 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       conversationId: body.conversationId,
       fromMemberId: socket.data.workspaceMemberId,
     });
+    // High-priority push so the device rings even when the PWA is closed. Bypasses quiet hours
+    // and per-screen suppression — incoming calls must always reach the user.
+    const caller = await this.prisma.workspaceMember.findUnique({
+      where: { id: socket.data.workspaceMemberId },
+      include: { user: { select: { name: true } } },
+    });
+    const callerName = caller?.user?.name || 'Someone';
+    this.notifications.dispatch({
+      workspaceId: socket.data.workspaceId,
+      recipientMemberId: body.toMemberId,
+      channel: 'call',
+      type: 'call_invite',
+      title: `Incoming call`,
+      body: `${callerName} is calling…`,
+      url: `/messages?c=${body.conversationId}`,
+      entityType: 'conversation',
+      entityId: body.conversationId,
+      pushTag: `call:${body.conversationId}`,
+      highPriority: true,
+      callInvite: { conversationId: body.conversationId, fromMemberId: socket.data.workspaceMemberId },
+    }).catch(() => {});
     return { ok: true };
   }
 
@@ -365,7 +405,7 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
 }
 
 @Module({
-  imports: [AuthModule, MessagesModule],
+  imports: [AuthModule, MessagesModule, PresenceModule, NotificationsModule],
   providers: [ChatGateway, CallGateway],
   exports: [ChatGateway, CallGateway],
 })

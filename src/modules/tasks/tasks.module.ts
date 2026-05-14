@@ -7,6 +7,7 @@ import { AuditLogInterceptor } from '../../common/interceptors/audit-log.interce
 import { successResponse, PaginationDto, paginationMeta } from '../../common/dto/response.dto';
 import { getTaskPermissions } from '../../common/utils/permissions';
 import { CreateTaskDto, UpdateTaskDto, TaskFilterDto, CreateChecklistItemDto, UpdateChecklistItemDto, ReorderChecklistDto } from './dto';
+import { NotificationsModule, NotificationsService } from '../notifications/notifications.module';
 
 const TASK_INCLUDE = {
   creator: { include: { user: { select: { id: true, name: true, avatarUrl: true } } } },
@@ -18,19 +19,20 @@ const TASK_INCLUDE = {
 
 @Injectable()
 export class TasksService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService, private notifications: NotificationsService) {}
 
   async create(wid: string, lid: string, dto: CreateTaskDto, member: any) {
     if (dto.parentTaskId) {
       const p = await this.prisma.task.findFirst({ where: { id: dto.parentTaskId, workspaceId: wid, parentTaskId: null } });
       if (!p) throw new BadRequestException('Invalid parent task');
     }
-    return this.prisma.task.create({
+    const assigneeId = dto.assigneeId || member.id;
+    const task = await this.prisma.task.create({
       data: {
         workspaceId: wid, listId: lid, parentTaskId: dto.parentTaskId || null,
         title: dto.title, description: dto.description || null,
         priority: (dto.priority || 'medium') as any,
-        creatorId: member.id, assigneeId: dto.assigneeId || member.id,
+        creatorId: member.id, assigneeId,
         source: 'manual' as any,
         startDate: dto.startDate ? new Date(dto.startDate) : null,
         startTime: dto.startTime || null,
@@ -40,6 +42,56 @@ export class TasksService {
       },
       include: TASK_INCLUDE,
     });
+    // Notify assignee if they didn't assign to themselves.
+    if (assigneeId !== member.id) this.notifyAssigned(task, member.id).catch(() => {});
+    return task;
+  }
+
+  /** Helpers for dispatching task-related notifications. Fire-and-forget; never block the
+   *  task mutation. */
+  private async notifyAssigned(task: any, byMemberId: string) {
+    if (!task.assigneeId || task.assigneeId === byMemberId) return;
+    const actor = await this.prisma.workspaceMember.findUnique({
+      where: { id: byMemberId }, include: { user: { select: { name: true } } },
+    });
+    const actorName = actor?.user?.name || 'Someone';
+    await this.notifications.dispatch({
+      workspaceId: task.workspaceId,
+      recipientMemberId: task.assigneeId,
+      channel: 'task_assigned',
+      type: 'task_assigned',
+      title: `${actorName} assigned you a task`,
+      body: task.title,
+      url: `/?task=${task.id}`,
+      entityType: 'task',
+      entityId: task.id,
+      suppressIfActiveScreen: `task:${task.id}`,
+      pushTag: `task:${task.id}`,
+    });
+  }
+
+  private async notifyStatusChanged(task: any, oldStatus: string, byMemberId: string) {
+    if (task.status === oldStatus) return;
+    const actor = await this.prisma.workspaceMember.findUnique({
+      where: { id: byMemberId }, include: { user: { select: { name: true } } },
+    });
+    const actorName = actor?.user?.name || 'Someone';
+    const recipients = new Set<string>();
+    if (task.creatorId && task.creatorId !== byMemberId) recipients.add(task.creatorId);
+    if (task.assigneeId && task.assigneeId !== byMemberId) recipients.add(task.assigneeId);
+    await Promise.all(Array.from(recipients).map(rid => this.notifications.dispatch({
+      workspaceId: task.workspaceId,
+      recipientMemberId: rid,
+      channel: 'task_status',
+      type: 'task_status',
+      title: `${actorName} moved a task to ${task.status}`,
+      body: task.title,
+      url: `/?task=${task.id}`,
+      entityType: 'task',
+      entityId: task.id,
+      suppressIfActiveScreen: `task:${task.id}`,
+      pushTag: `task:${task.id}`,
+    })));
   }
 
   async findAll(wid: string, member: any, f: TaskFilterDto, page: number, perPage: number) {
@@ -99,6 +151,14 @@ export class TasksService {
       else if (dto.status !== 'done' && task.status === 'done') data.completedAt = null;
     }
     const updated = await this.prisma.task.update({ where: { id: tid }, data, include: TASK_INCLUDE });
+
+    // Notify on assignee change (reassignment) and status change.
+    if (dto.assigneeId !== undefined && dto.assigneeId && dto.assigneeId !== task.assigneeId) {
+      this.notifyAssigned(updated, member.id).catch(() => {});
+    }
+    if (dto.status !== undefined && dto.status !== task.status) {
+      this.notifyStatusChanged(updated, task.status, member.id).catch(() => {});
+    }
     return { task: updated, oldTask: task };
   }
 
@@ -256,6 +316,7 @@ export class TasksController {
 }
 
 @Module({
+  imports: [NotificationsModule],
   controllers: [TasksController],
   providers: [TasksService],
   exports: [TasksService],
