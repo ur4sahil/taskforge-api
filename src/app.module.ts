@@ -26,6 +26,7 @@ import { MessagesModule } from './modules/messages/messages.module';
 import { PushModule } from './modules/push/push.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { WorkersModule } from './workers/workers.module';
+import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
 import { JwtAuthGuard } from './common/guards';
 
 @Module({
@@ -50,6 +51,7 @@ import { JwtAuthGuard } from './common/guards';
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,
     NotificationsModule, SearchModule, ViewsModule, ReportsModule,
     AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, PushModule, RealtimeModule, WorkersModule,
+    ClientErrorsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
