@@ -160,20 +160,36 @@ export class MessagesService {
     return this.hydrateConversation(created.id, mid);
   }
 
-  /** Create a group conversation. Caller is auto-added. */
+  /** Create a group conversation. Caller is auto-added.
+   *  Dedupes against a recent (<60s) identical group — same name + same exact member set —
+   *  to make double-tapped create buttons idempotent and stop the "4 identical groups" UX bug
+   *  when the client retries on a slow network. */
   async createGroup(wid: string, mid: string, dto: CreateGroupDto) {
-    // De-dupe + ensure caller is included.
-    const ids = Array.from(new Set([mid, ...dto.memberIds]));
+    const ids = Array.from(new Set([mid, ...dto.memberIds])).sort();
     if (ids.length < 3) throw new BadRequestException('Groups need at least 3 members');
     const valid = await this.prisma.workspaceMember.findMany({
       where: { id: { in: ids }, workspaceId: wid, isActive: true }, select: { id: true },
     });
     if (valid.length !== ids.length) throw new BadRequestException('One or more members are invalid');
 
+    const name = dto.name.trim();
+    // Recent dupe check: same workspace + name, created in the last 60s, with the exact same member set.
+    const since = new Date(Date.now() - 60_000);
+    const recent = await this.prisma.conversation.findMany({
+      where: { workspaceId: wid, name, createdAt: { gte: since } },
+      include: { members: { select: { workspaceMemberId: true } } },
+    });
+    for (const c of recent) {
+      const existing = c.members.map(m => m.workspaceMemberId).sort();
+      if (existing.length === ids.length && existing.every((id, i) => id === ids[i])) {
+        return this.hydrateConversation(c.id, mid);
+      }
+    }
+
     const created = await this.prisma.conversation.create({
       data: {
         workspaceId: wid,
-        name: dto.name.trim(),
+        name,
         members: { create: ids.map(id => ({ workspaceMemberId: id })) },
       },
     });
