@@ -112,6 +112,7 @@ model WorkspaceMember {
   conversationMemberships ConversationMember[]
   sentMessages     Message[]          @relation("MessageSender")
   messageReactions MessageReaction[]
+  pushSubscriptions PushSubscription[]
 
   @@unique([workspaceId, userId])
   @@index([workspaceId])
@@ -587,6 +588,9 @@ model Message {
   isPinned       Boolean   @default(false) @map("is_pinned")
   // Soft-delete: keep the row for thread integrity but blank the body in UI.
   deletedAt      DateTime? @map("deleted_at")
+  // OpenGraph metadata for the first URL detected in the body. Populated async after send.
+  // Shape: { url, title?, description?, image?, siteName? }
+  linkPreview    Json?     @map("link_preview")
   createdAt      DateTime  @default(now()) @map("created_at")
   editedAt       DateTime? @map("edited_at")
 
@@ -619,4 +623,21 @@ model MessageReaction {
   @@unique([messageId, workspaceMemberId, emoji])
   @@index([messageId])
   @@map("message_reactions")
+}
+
+// Web Push subscriptions per WorkspaceMember. One member can have multiple devices/browsers.
+model PushSubscription {
+  id                String   @id @default(uuid()) @db.Uuid
+  workspaceMemberId String   @map("workspace_member_id") @db.Uuid
+  endpoint          String   @unique @db.VarChar(500)
+  p256dh            String   @db.VarChar(255)
+  authKey           String   @map("auth_key") @db.VarChar(255)
+  userAgent         String?  @map("user_agent") @db.VarChar(500)
+  createdAt         DateTime @default(now()) @map("created_at")
+  lastSeenAt        DateTime @default(now()) @map("last_seen_at")
+
+  workspaceMember WorkspaceMember @relation(fields: [workspaceMemberId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceMemberId])
+  @@map("push_subscriptions")
 }
