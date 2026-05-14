@@ -37,6 +37,9 @@ export const storageConfig = registerAs('storage', () => ({
   r2AccessKeyId: process.env.R2_ACCESS_KEY_ID,
   r2SecretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
   r2PublicUrl: process.env.R2_PUBLIC_URL,
+  // Optional prefix prepended to every key. Used when sharing a bucket with another
+  // app (e.g. FlipRadar's flipradar-photos bucket). Empty = no prefix.
+  r2KeyPrefix: process.env.R2_KEY_PREFIX || '',
   presignedUrlExpirySeconds: parseInt(process.env.R2_URL_TTL || '3600', 10),
 }));
 
