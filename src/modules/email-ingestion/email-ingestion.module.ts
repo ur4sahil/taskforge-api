@@ -1,8 +1,19 @@
 import { Injectable, Module, Controller, Post, Body, Headers, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Public } from '../../common/decorators';
 import { successResponse } from '../../common/dto/response.dto';
+
+/** Constant-time string compare. Returns false for length mismatch without
+ *  leaking which side was longer. Avoids the `a !== b` early-exit timing
+ *  signal on each character. */
+function safeEqual(a: string, b: string): boolean {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
 
 /**
  * Normalized inbound-email payload. The Cloudflare Email Worker (or any other
@@ -106,7 +117,7 @@ export class EmailIngestionController {
       this.log.error('INBOUND_WEBHOOK_SECRET not configured — refusing inbound email');
       throw new UnauthorizedException('Inbound webhook not configured');
     }
-    if (headerSecret !== expected) {
+    if (!headerSecret || !safeEqual(headerSecret, expected)) {
       this.log.warn('Inbound webhook called with bad or missing secret');
       throw new UnauthorizedException('Invalid inbound secret');
     }
