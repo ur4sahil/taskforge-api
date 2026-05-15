@@ -10,8 +10,9 @@ export class UpdateWorkspaceDto {
 }
 
 export class InviteMemberDto {
-  @IsString() email: string = '';
-  @IsString() role: string = 'employee';
+  @IsString() @IsNotEmpty() @MaxLength(255) email: string = '';
+  @IsString() @IsNotEmpty() @MaxLength(100) name: string = '';
+  @IsOptional() @IsEnum(['admin', 'manager', 'employee'] as any) role?: 'admin' | 'manager' | 'employee';
   @IsOptional() @IsUUID() managerId?: string;
 }
 

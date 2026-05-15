@@ -1,6 +1,6 @@
 import { Controller, Post, Get, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
 import { WorkspacesService } from './workspaces.service';
-import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto } from './dto';
+import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, InviteMemberDto } from './dto';
 import { CurrentUser, CurrentMember, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
 import { successResponse, PaginationDto } from '../../common/dto/response.dto';
@@ -37,6 +37,13 @@ export class WorkspacesController {
   async members(@Param('wid') wid: string, @Query() p: PaginationDto) {
     const r = await this.svc.getMembers(wid, p.page, p.perPage);
     return successResponse(r.members, r.meta);
+  }
+
+  @Post(':wid/members')
+  @UseGuards(WorkspaceGuard, RolesGuard)
+  @Roles('admin')
+  async inviteMember(@Param('wid') wid: string, @Body() dto: InviteMemberDto) {
+    return successResponse(await this.svc.inviteMember(wid, dto));
   }
 
   @Patch(':wid/members/:mid')

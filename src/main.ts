@@ -1,3 +1,8 @@
+// Make BigInt values JSON-serializable. Prisma returns BigInt for autoincrement
+// id columns (e.g. AuditLog.id); without this, `res.json(rows)` throws "Do not
+// know how to serialize a BigInt" and the request 500s.
+(BigInt.prototype as any).toJSON = function () { return this.toString(); };
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';

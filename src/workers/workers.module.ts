@@ -149,6 +149,9 @@ export class WorkerScheduler implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap() {
+    // In test, ioredis-mock can't service BullMQ's nested ioredis import; skip scheduling
+    // so the suite doesn't dangle on background Redis retries.
+    if (process.env.NODE_ENV === 'test') return;
     await this.schedule(this.remindersQ, 'reminders-tick', '* * * * *');
     await this.schedule(this.overdueQ, 'overdue-tick', '*/15 * * * *');
     await this.schedule(this.recurringQ, 'recurring-tick', '0 * * * *');

@@ -297,6 +297,14 @@ export class TasksController {
     return successResponse(await this.svc.addChecklist(t, d));
   }
 
+  // Declare the literal-path /checklist/reorder BEFORE the wildcard /:cid match,
+  // otherwise Nest routes it to updateChecklist with cid="reorder" → invalid UUID 500.
+  @Patch('tasks/:tid/checklist/reorder')
+  async reorder(@Param('tid') t: string, @Body() d: ReorderChecklistDto) {
+    await this.svc.reorderChecklist(t, d);
+    return successResponse({ ok: true });
+  }
+
   @Patch('tasks/:tid/checklist/:cid')
   async updateChecklist(@Param('cid') c: string, @Body() d: UpdateChecklistItemDto) {
     return successResponse(await this.svc.updateChecklist(c, d));
@@ -306,12 +314,6 @@ export class TasksController {
   async deleteChecklist(@Param('cid') c: string) {
     await this.svc.deleteChecklist(c);
     return successResponse({ deleted: true });
-  }
-
-  @Patch('tasks/:tid/checklist/reorder')
-  async reorder(@Param('tid') t: string, @Body() d: ReorderChecklistDto) {
-    await this.svc.reorderChecklist(t, d);
-    return successResponse({ ok: true });
   }
 }
 

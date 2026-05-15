@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Module, Controller, Post, Get, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, Module, Controller, Post, Get, Delete, Body, Param, Query, UseGuards } from '@nestjs/common';
 import { IsString, IsNotEmpty } from 'class-validator';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember } from '../../common/decorators';
@@ -69,6 +69,22 @@ export class CommentsService {
     })));
   }
 
+  /** Delete a comment. Author can delete their own; workspace admins can delete any.
+   *  Cascades to Mention + Attachment rows via Prisma onDelete in the schema. Notification
+   *  rows reference the comment via JSON `data.entityId` (not an FK) so they linger as
+   *  history — clicking them just no-ops once the entity is gone. */
+  async delete(wid: string, tid: string, cid: string, actorMemberId: string, actorRole: string) {
+    const comment = await this.prisma.comment.findFirst({
+      where: { id: cid, taskId: tid, task: { workspaceId: wid } },
+      select: { id: true, authorId: true },
+    });
+    if (!comment) throw new NotFoundException('Comment not found');
+    if (comment.authorId !== actorMemberId && actorRole !== 'admin') {
+      throw new ForbiddenException('Only the author or an admin can delete this comment');
+    }
+    await this.prisma.comment.delete({ where: { id: cid } });
+  }
+
   async findByTask(tid: string, page: number, perPage: number) {
     const [comments, total] = await Promise.all([
       this.prisma.comment.findMany({
@@ -87,6 +103,10 @@ export class CommentsController {
   constructor(private svc: CommentsService) {}
   @Post() async create(@Param('wid') w: string, @Param('tid') t: string, @Body() d: CreateCommentDto, @CurrentMember() m: any) { return successResponse(await this.svc.create(w, t, d, m.id)); }
   @Get() async findAll(@Param('tid') t: string, @Query() p: PaginationDto) { const r = await this.svc.findByTask(t, p.page, p.perPage); return successResponse(r.comments, r.meta); }
+  @Delete(':cid') async remove(@Param('wid') w: string, @Param('tid') t: string, @Param('cid') c: string, @CurrentMember() m: any) {
+    await this.svc.delete(w, t, c, m.id, m.role);
+    return successResponse({ deleted: true });
+  }
 }
 
 @Module({

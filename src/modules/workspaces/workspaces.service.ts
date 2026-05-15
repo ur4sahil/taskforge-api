@@ -1,8 +1,10 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
+import { randomBytes } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { generateSlug } from '../../common/utils/slug';
 import { paginationMeta } from '../../common/dto/response.dto';
-import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto } from './dto';
+import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, InviteMemberDto } from './dto';
 
 @Injectable()
 export class WorkspacesService {
@@ -55,6 +57,58 @@ export class WorkspacesService {
       this.prisma.workspaceMember.count({ where: { workspaceId: wid } }),
     ]);
     return { members, meta: paginationMeta(total, page, perPage) };
+  }
+
+  /** Add a member to a workspace. If a user with the given email already exists, link them.
+   *  If not, create the user with a generated temporary password and surface it to the
+   *  caller — the inviting admin shares it out-of-band. Idempotency: if the user is already
+   *  an active member of this workspace, returns 409.
+   *
+   *  Reactivates a previously-deactivated member instead of creating a duplicate. */
+  async inviteMember(wid: string, dto: InviteMemberDto) {
+    const email = dto.email.trim().toLowerCase();
+    const role = dto.role || 'employee';
+
+    let user = await this.prisma.user.findUnique({ where: { email } });
+    let tempPassword: string | null = null;
+    if (!user) {
+      tempPassword = randomBytes(9).toString('base64').replace(/[/+=]/g, '').slice(0, 12) + '!1';
+      user = await this.prisma.user.create({
+        data: {
+          email,
+          name: dto.name,
+          passwordHash: await bcrypt.hash(tempPassword, 12),
+          authProvider: 'email',
+        },
+      });
+    }
+
+    const existing = await this.prisma.workspaceMember.findFirst({
+      where: { workspaceId: wid, userId: user.id },
+    });
+    if (existing) {
+      if (existing.isActive) throw new ConflictException('User is already a member of this workspace');
+      // Reactivate + update role/manager from the new invite payload.
+      const reactivated = await this.prisma.workspaceMember.update({
+        where: { id: existing.id },
+        data: { isActive: true, role: role as any, managerId: dto.managerId ?? null },
+        include: { user: { select: { id: true, email: true, name: true, avatarUrl: true } } },
+      });
+      return { isNewUser: false, tempPassword: null, member: reactivated };
+    }
+
+    const member = await this.prisma.workspaceMember.create({
+      data: {
+        workspaceId: wid,
+        userId: user.id,
+        role: role as any,
+        managerId: dto.managerId ?? null,
+        timezone: 'UTC',
+        isActive: true,
+      },
+      include: { user: { select: { id: true, email: true, name: true, avatarUrl: true } } },
+    });
+    return { isNewUser: tempPassword !== null, tempPassword, member };
   }
 
   async updateMember(wid: string, mid: string, dto: UpdateMemberDto) {
