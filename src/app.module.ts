@@ -32,7 +32,14 @@ import { JwtAuthGuard } from './common/guards';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig] }),
-    ThrottlerModule.forRoot([{ name: 'default', ttl: 60000, limit: 100 }]),
+    // Two throttler buckets: the global `default` (100/min) and a tight `auth`
+    // bucket (5/min) for login + signup, applied per-route via @Throttle below.
+    // Both skip entirely in NODE_ENV=test so the in-memory tracker doesn't
+    // accumulate across the suite (auth.spec.ts hits /auth/signup 9 times).
+    ThrottlerModule.forRoot([
+      { name: 'default', ttl: 60_000, limit: 100, skipIf: () => process.env.NODE_ENV === 'test' },
+      { name: 'auth', ttl: 60_000, limit: 5, skipIf: () => process.env.NODE_ENV === 'test' },
+    ]),
     BullModule.forRootAsync({
       useFactory: () => {
         const url = new URL(process.env.REDIS_URL || 'redis://localhost:6379');

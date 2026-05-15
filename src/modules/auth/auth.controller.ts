@@ -1,5 +1,6 @@
 import { Controller, Post, Get, Body, Req, Res, HttpCode, HttpStatus, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { Throttle } from '@nestjs/throttler';
 import { Request, Response } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
@@ -7,17 +8,23 @@ import { SignupDto, LoginDto, RefreshTokenDto } from './dto';
 import { Public } from '../../common/decorators';
 import { successResponse } from '../../common/dto/response.dto';
 
+// Tight rate-limit on credential endpoints — 5/min/ip. The global default is
+// 100/min; without this, brute-forcing a password would get 100 attempts/min/ip.
+const AUTH_RATE = { auth: { limit: 5, ttl: 60_000 } };
+
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService, private readonly config: ConfigService) {}
 
   @Public()
+  @Throttle(AUTH_RATE)
   @Post('signup')
   async signup(@Body() dto: SignupDto, @Req() req: Request) {
     return successResponse(await this.auth.signup(dto, req.ip, req.headers['user-agent'] as string));
   }
 
   @Public()
+  @Throttle(AUTH_RATE)
   @Post('login')
   @HttpCode(HttpStatus.OK)
   async login(@Body() dto: LoginDto, @Req() req: Request) {
@@ -25,6 +32,7 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle(AUTH_RATE)
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refresh(@Body() dto: RefreshTokenDto, @Req() req: Request) {
