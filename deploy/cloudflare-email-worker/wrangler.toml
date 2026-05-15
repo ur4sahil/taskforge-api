@@ -1,8 +1,0 @@
-name = "taskforge-email-router"
-main = "worker.js"
-compatibility_date = "2024-09-25"
-compatibility_flags = ["nodejs_compat"]
-
-# Plain (non-secret) vars. Set the secret with `wrangler secret put TASKFORGE_SECRET`.
-[vars]
-TASKFORGE_WEBHOOK_URL = "https://taskforge-api.sigmahousingllc.com/api/v1/webhooks/inbound-email"
