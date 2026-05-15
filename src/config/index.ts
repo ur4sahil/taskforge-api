@@ -15,9 +15,20 @@ export const pushConfig = registerAs('push', () => ({
   vapidSubject: process.env.VAPID_SUBJECT || 'mailto:noreply@taskforge.local',
 }));
 
+function requireSecret(name: string, fallback: string): string {
+  const value = process.env[name];
+  if (value) return value;
+  if (process.env.NODE_ENV === 'production') {
+    // A misconfigured deploy that quietly falls back to 'dev-access-secret'
+    // would let anyone forge JWTs. Better to crash on boot than ship insecure.
+    throw new Error(`${name} is required in production`);
+  }
+  return fallback;
+}
+
 export const authConfig = registerAs('auth', () => ({
-  jwtAccessSecret: process.env.JWT_ACCESS_SECRET || 'dev-access-secret',
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret',
+  jwtAccessSecret: requireSecret('JWT_ACCESS_SECRET', 'dev-access-secret'),
+  jwtRefreshSecret: requireSecret('JWT_REFRESH_SECRET', 'dev-refresh-secret'),
   jwtAccessExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',
   jwtRefreshExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
   bcryptRounds: 12,
