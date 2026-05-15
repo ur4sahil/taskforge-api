@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Module, Controller, Post, Get, Delete, Param, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, PayloadTooLargeException, Module, Controller, Post, Get, Delete, Param, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -6,6 +6,11 @@ import { CurrentMember } from '../../common/decorators';
 import { WorkspaceGuard } from '../../common/guards';
 import { successResponse } from '../../common/dto/response.dto';
 import { R2StorageService } from '../../common/utils/r2-storage';
+
+// Multer caps the streamed body at this size and aborts before buffering the
+// rest. Without this, multer reads the entire request into memory first and
+// only THEN do we get to enforce a limit — a 10GB POST would OOM the worker.
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
 
 const BLOCKED = ['.exe', '.bat', '.sh', '.ps1', '.cmd', '.vbs', '.jar', '.msi', '.scr', '.dll'];
 
@@ -23,7 +28,7 @@ export class AttachmentsService {
   }
   async uploadToTask(wid: string, tid: string, file: any, uid: string) {
     if (!file || !file.buffer) throw new BadRequestException('No file provided');
-    if (file.size > 50 * 1024 * 1024) throw new BadRequestException('File too large');
+    if (file.size > MAX_UPLOAD_BYTES) throw new PayloadTooLargeException('File too large (max 50 MB)');
     const ext = '.' + (file.originalname || '').split('.').pop()?.toLowerCase();
     if (BLOCKED.includes(ext)) throw new BadRequestException('Blocked file type');
     const task = await this.prisma.task.findFirst({ where: { id: tid, workspaceId: wid, deletedAt: null } });
@@ -52,7 +57,8 @@ export class AttachmentsController {
   constructor(private svc: AttachmentsService) {}
   @Get('tasks/:tid/attachments')
   async list(@Param('wid') w: string, @Param('tid') t: string) { return successResponse(await this.svc.listForTask(w, t)); }
-  @Post('tasks/:tid/attachments') @UseInterceptors(FileInterceptor('file'))
+  @Post('tasks/:tid/attachments')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   async toTask(@Param('wid') w: string, @Param('tid') t: string, @UploadedFile() f: any, @CurrentMember() m: any) { return successResponse(await this.svc.uploadToTask(w, t, f, m.id)); }
   @Get('attachments/:aid/url')
   async url(@Param('wid') w: string, @Param('aid') a: string) { return successResponse(await this.svc.getUrl(w, a)); }
