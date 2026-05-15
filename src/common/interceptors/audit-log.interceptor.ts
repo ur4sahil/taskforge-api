@@ -27,7 +27,17 @@ export class AuditLogInterceptor implements NestInterceptor {
           ipAddress: req.ip || null,
           userAgent: req.headers['user-agent'] || null,
         },
-      }).catch((e: any) => this.logger.error(e.message));
+      }).catch((e: any) => {
+        // FK violations happen legitimately when a request deletes the workspace
+        // or actor — the audit row references rows that no longer exist. Quietly
+        // drop those, since by definition there's no audit history to preserve
+        // for an entity that no longer exists. Anything else is a real surprise.
+        if (e?.code === 'P2003' || /Foreign key constraint/i.test(e?.message || '')) {
+          this.logger.debug(`audit log dropped: ${a.action} ${a.entityType}:${a.entityId} — referenced row gone`);
+          return;
+        }
+        this.logger.error(`audit log failed: ${e?.message || e}`);
+      });
     }));
   }
 }
