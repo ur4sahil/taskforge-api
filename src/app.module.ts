@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
 import { appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig } from './config';
@@ -28,6 +28,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { WorkersModule } from './workers/workers.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
 import { JwtAuthGuard } from './common/guards';
+import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
 function shouldSkipThrottle(ctx: any): boolean {
   if (process.env.NODE_ENV === 'test') return true;
@@ -85,6 +86,10 @@ function shouldSkipThrottle(ctx: any): boolean {
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Global audit logger. Reads req.__auditData if a controller sets it on
+    // success; controllers that don't set it just write no audit row. Matches
+    // the behavior promised in the api CLAUDE.md.
+    { provide: APP_INTERCEPTOR, useClass: AuditLogInterceptor },
   ],
 })
 export class AppModule {}

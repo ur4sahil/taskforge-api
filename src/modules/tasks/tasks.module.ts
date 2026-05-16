@@ -1,9 +1,8 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Module, Controller, Post, Get, Patch, Delete, Body, Param, Query, UseGuards, UseInterceptors, Req } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Module, Controller, Post, Get, Patch, Delete, Body, Param, Query, UseGuards, Req } from '@nestjs/common';
 import { Request } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
-import { AuditLogInterceptor } from '../../common/interceptors/audit-log.interceptor';
 import { successResponse, PaginationDto, paginationMeta } from '../../common/dto/response.dto';
 import { getTaskPermissions } from '../../common/utils/permissions';
 import { CreateTaskDto, UpdateTaskDto, TaskFilterDto, CreateChecklistItemDto, UpdateChecklistItemDto, ReorderChecklistDto } from './dto';
@@ -236,7 +235,6 @@ export class TasksService {
 
 @Controller('workspaces/:wid')
 @UseGuards(WorkspaceGuard)
-@UseInterceptors(AuditLogInterceptor)
 export class TasksController {
   constructor(private svc: TasksService) {}
 

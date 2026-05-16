@@ -6,13 +6,14 @@ import { ConflictException } from '@nestjs/common';
 
 function makeService(overrides: any = {}) {
   const prisma: any = {
-    workspace: { create: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+    workspace: { create: jest.fn(), findUnique: jest.fn().mockResolvedValue({ name: 'WS' }), update: jest.fn() },
     workspaceMember: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn(), create: jest.fn() },
     task: { count: jest.fn().mockResolvedValue(0) },
     ...overrides,
   };
-  return { service: new WorkspacesService(prisma), prisma };
+  const notifications: any = { dispatch: jest.fn().mockResolvedValue(null) };
+  return { service: new WorkspacesService(prisma, notifications), prisma, notifications };
 }
 
 describe('WorkspacesService.inviteMember', () => {

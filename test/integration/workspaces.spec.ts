@@ -157,6 +157,55 @@ describe('Workspaces', () => {
       expect(res.status).toBe(403);
     });
 
+    it('sets WorkspaceMember.invitedBy to the inviting admin', async () => {
+      const { user, workspace, member } = await seedWorkspace();
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members`)
+        .set(authHeader(user.id, user.email))
+        .send({ email: 'who@example.com', name: 'New', role: 'employee' });
+      expect(res.status).toBe(201);
+      const row = await prisma().workspaceMember.findUnique({ where: { id: res.body.data.member.id } });
+      expect(row!.invitedBy).toBe(member.id);
+    });
+
+    it('writes an audit log entry for the invite', async () => {
+      const { user, workspace } = await seedWorkspace();
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members`)
+        .set(authHeader(user.id, user.email))
+        .send({ email: 'audit-test@example.com', name: 'A', role: 'manager' });
+      expect(res.status).toBe(201);
+      // Audit interceptor writes asynchronously after the response; small wait.
+      for (let i = 0; i < 10; i++) {
+        const logs = await prisma().auditLog.findMany({ where: { workspaceId: workspace.id, action: 'member.invited' } });
+        if (logs.length > 0) {
+          expect(logs[0].entityType).toBe('workspaceMember');
+          expect(logs[0].entityId).toBe(res.body.data.member.id);
+          const changes = logs[0].changes as any;
+          expect(changes.email).toBe('audit-test@example.com');
+          expect(changes.role).toBe('manager');
+          expect(changes.isNewUser).toBe(true);
+          return;
+        }
+        await new Promise(r => setTimeout(r, 50));
+      }
+      throw new Error('audit log row never appeared');
+    });
+
+    it('dispatches an `invite` notification visible to the new member', async () => {
+      const { user, workspace } = await seedWorkspace();
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members`)
+        .set(authHeader(user.id, user.email))
+        .send({ email: 'notify@example.com', name: 'Notify', role: 'employee' });
+      expect(res.status).toBe(201);
+      const notifs = await prisma().notification.findMany({
+        where: { workspaceId: workspace.id, recipientId: res.body.data.member.id, type: 'invite' },
+      });
+      expect(notifs.length).toBe(1);
+      expect(notifs[0].title).toMatch(/added to a workspace/i);
+    });
+
     it('lowercases the email before lookup/storage', async () => {
       const { user, workspace } = await seedWorkspace();
       const res = await request(app.getHttpServer())

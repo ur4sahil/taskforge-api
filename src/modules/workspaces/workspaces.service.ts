@@ -1,14 +1,19 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, forwardRef, Inject } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { generateSlug } from '../../common/utils/slug';
 import { paginationMeta } from '../../common/dto/response.dto';
 import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, InviteMemberDto } from './dto';
+import { NotificationsService } from '../notifications/notifications.module';
 
 @Injectable()
 export class WorkspacesService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    @Inject(forwardRef(() => NotificationsService))
+    private notifications: NotificationsService,
+  ) {}
 
   async create(dto: CreateWorkspaceDto, userId: string) {
     return this.prisma.workspace.create({
@@ -64,8 +69,13 @@ export class WorkspacesService {
    *  caller — the inviting admin shares it out-of-band. Idempotency: if the user is already
    *  an active member of this workspace, returns 409.
    *
-   *  Reactivates a previously-deactivated member instead of creating a duplicate. */
-  async inviteMember(wid: string, dto: InviteMemberDto) {
+   *  Reactivates a previously-deactivated member instead of creating a duplicate.
+   *
+   *  Side effects:
+   *   - Sets WorkspaceMember.invitedBy to the actor (so audit history records who).
+   *   - Dispatches a `notification:invite` to the new member (in-app feed).
+   *   - Returns the new row + plaintext temp password (only for genuinely new users). */
+  async inviteMember(wid: string, dto: InviteMemberDto, actorMemberId?: string) {
     const email = dto.email.trim().toLowerCase();
     const role = dto.role || 'employee';
 
@@ -91,9 +101,10 @@ export class WorkspacesService {
       // Reactivate + update role/manager from the new invite payload.
       const reactivated = await this.prisma.workspaceMember.update({
         where: { id: existing.id },
-        data: { isActive: true, role: role as any, managerId: dto.managerId ?? null },
+        data: { isActive: true, role: role as any, managerId: dto.managerId ?? null, invitedBy: actorMemberId ?? null },
         include: { user: { select: { id: true, email: true, name: true, avatarUrl: true } } },
       });
+      await this.notifyInvited(wid, reactivated.id);
       return { isNewUser: false, tempPassword: null, member: reactivated };
     }
 
@@ -105,10 +116,33 @@ export class WorkspacesService {
         managerId: dto.managerId ?? null,
         timezone: 'UTC',
         isActive: true,
+        invitedBy: actorMemberId ?? null,
       },
       include: { user: { select: { id: true, email: true, name: true, avatarUrl: true } } },
     });
+    await this.notifyInvited(wid, member.id);
     return { isNewUser: tempPassword !== null, tempPassword, member };
+  }
+
+  /** In-app notification visible to the new member on their first login. Failures
+   *  are swallowed — a missing notification shouldn't fail the invite call. */
+  private async notifyInvited(workspaceId: string, recipientMemberId: string) {
+    const ws = await this.prisma.workspace.findUnique({ where: { id: workspaceId }, select: { name: true } });
+    try {
+      await this.notifications.dispatch({
+        workspaceId,
+        recipientMemberId,
+        channel: 'invite',
+        type: 'invite',
+        title: 'You were added to a workspace',
+        body: ws ? `Welcome to ${ws.name}` : 'Welcome',
+        url: '/',
+        entityType: 'workspace',
+        entityId: workspaceId,
+      });
+    } catch {
+      // best-effort
+    }
   }
 
   async updateMember(wid: string, mid: string, dto: UpdateMemberDto) {

@@ -1,4 +1,5 @@
-import { Controller, Post, Get, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Patch, Body, Param, Query, Req, UseGuards } from '@nestjs/common';
+import { Request } from 'express';
 import { WorkspacesService } from './workspaces.service';
 import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, InviteMemberDto } from './dto';
 import { CurrentUser, CurrentMember, Roles } from '../../common/decorators';
@@ -42,8 +43,15 @@ export class WorkspacesController {
   @Post(':wid/members')
   @UseGuards(WorkspaceGuard, RolesGuard)
   @Roles('admin')
-  async inviteMember(@Param('wid') wid: string, @Body() dto: InviteMemberDto) {
-    return successResponse(await this.svc.inviteMember(wid, dto));
+  async inviteMember(@Param('wid') wid: string, @Body() dto: InviteMemberDto, @CurrentMember() actor: any, @Req() req: Request) {
+    const result = await this.svc.inviteMember(wid, dto, actor.id);
+    (req as any).__auditData = {
+      action: 'member.invited',
+      entityType: 'workspaceMember',
+      entityId: result.member.id,
+      changes: { email: result.member.user?.email, role: result.member.role, isNewUser: result.isNewUser },
+    };
+    return successResponse(result);
   }
 
   @Patch(':wid/members/:mid')
