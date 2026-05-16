@@ -67,6 +67,20 @@ export class WorkspacesController {
     return successResponse(await this.svc.updateMember(wid, mid, dto));
   }
 
+  @Post(':wid/members/:mid/rotate-password')
+  @UseGuards(WorkspaceGuard, RolesGuard)
+  @Roles('admin')
+  async rotatePassword(@Param('wid') wid: string, @Param('mid') mid: string, @Req() req: Request) {
+    const out = await this.svc.rotatePassword(wid, mid);
+    (req as any).__auditData = {
+      action: 'member.password-rotated',
+      entityType: 'workspaceMember',
+      entityId: mid,
+      changes: { email: out.email },
+    };
+    return successResponse(out);
+  }
+
   @Post(':wid/members/:mid/deactivate')
   @UseGuards(WorkspaceGuard, RolesGuard)
   @Roles('admin')

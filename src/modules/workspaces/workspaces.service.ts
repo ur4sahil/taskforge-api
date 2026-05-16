@@ -159,6 +159,36 @@ export class WorkspacesService {
     });
   }
 
+  /** Admin-initiated password rotation. Useful when an invited user lost
+   *  their temp password OR a member needs a hard reset. Generates a new
+   *  random temp password, hashes it, stores it on the User row, and
+   *  surfaces the plaintext to the admin so they can share out-of-band.
+   *
+   *  Refuses to rotate for OAuth-only accounts (no passwordHash to begin
+   *  with — they sign in via Google). */
+  async rotatePassword(wid: string, mid: string): Promise<{ tempPassword: string; email: string }> {
+    const member = await this.prisma.workspaceMember.findFirst({
+      where: { id: mid, workspaceId: wid },
+      include: { user: { select: { id: true, email: true, authProvider: true } } },
+    });
+    if (!member) throw new NotFoundException('Member not found');
+    if (member.user.authProvider !== 'email') {
+      throw new BadRequestException('Cannot rotate password for non-email accounts (e.g. Google sign-in)');
+    }
+    const tempPassword = randomBytes(9).toString('base64').replace(/[/+=]/g, '').slice(0, 12) + '!1';
+    await this.prisma.user.update({
+      where: { id: member.user.id },
+      data: { passwordHash: await bcrypt.hash(tempPassword, 12) },
+    });
+    // Invalidate any active refresh tokens — forces the affected user to log
+    // in fresh, otherwise an already-signed-in session keeps working.
+    await this.prisma.refreshToken.updateMany({
+      where: { userId: member.user.id, isRevoked: false },
+      data: { isRevoked: true },
+    });
+    return { tempPassword, email: member.user.email };
+  }
+
   async deactivateMember(wid: string, mid: string) {
     const open = await this.prisma.task.count({
       where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null },

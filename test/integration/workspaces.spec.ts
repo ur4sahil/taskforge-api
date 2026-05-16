@@ -217,6 +217,98 @@ describe('Workspaces', () => {
     });
   });
 
+  describe('POST /workspaces/:wid/members/:mid/rotate-password', () => {
+    it('admin can rotate; returns new temp password; old password no longer logs in', async () => {
+      const { user: admin, workspace } = await seedWorkspace();
+      // Invite to create a member with a known temp password.
+      const invite = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members`)
+        .set(authHeader(admin.id, admin.email))
+        .send({ email: 'rotate-me@example.com', name: 'R', role: 'employee' });
+      const oldPw = invite.body.data.tempPassword as string;
+      const newMid = invite.body.data.member.id;
+
+      // Old password works:
+      const before = await request(app.getHttpServer())
+        .post('/api/v1/auth/login').send({ email: 'rotate-me@example.com', password: oldPw });
+      expect(before.status).toBe(200);
+
+      const rot = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members/${newMid}/rotate-password`)
+        .set(authHeader(admin.id, admin.email));
+      expect(rot.status).toBe(201);
+      const newPw = rot.body.data.tempPassword as string;
+      expect(newPw).not.toBe(oldPw);
+      expect(rot.body.data.email).toBe('rotate-me@example.com');
+
+      // Old password now rejected; new password accepted.
+      const oldLogin = await request(app.getHttpServer())
+        .post('/api/v1/auth/login').send({ email: 'rotate-me@example.com', password: oldPw });
+      expect(oldLogin.status).toBe(401);
+      const newLogin = await request(app.getHttpServer())
+        .post('/api/v1/auth/login').send({ email: 'rotate-me@example.com', password: newPw });
+      expect(newLogin.status).toBe(200);
+    });
+
+    it('rotation revokes all the user\'s active refresh tokens', async () => {
+      const { user: admin, workspace } = await seedWorkspace();
+      const invite = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members`)
+        .set(authHeader(admin.id, admin.email))
+        .send({ email: 'session-killed@example.com', name: 'S', role: 'employee' });
+      const oldPw = invite.body.data.tempPassword as string;
+      const newMid = invite.body.data.member.id;
+
+      // Log in once so a refresh token exists.
+      const loginRes = await request(app.getHttpServer())
+        .post('/api/v1/auth/login').send({ email: 'session-killed@example.com', password: oldPw });
+      const refreshToken = loginRes.body.data.refreshToken as string;
+
+      // Refresh works before rotation.
+      const before = await request(app.getHttpServer())
+        .post('/api/v1/auth/refresh').send({ refreshToken });
+      expect(before.status).toBe(200);
+      // The successful refresh just rotated the refresh token. Get the new one.
+      const newRefresh = before.body.data.refreshToken as string;
+
+      // Rotate password.
+      await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members/${newMid}/rotate-password`)
+        .set(authHeader(admin.id, admin.email));
+
+      // Now the (currently-valid) refresh token must be rejected.
+      const after = await request(app.getHttpServer())
+        .post('/api/v1/auth/refresh').send({ refreshToken: newRefresh });
+      expect(after.status).toBe(401);
+    });
+
+    it('rejects rotation for Google OAuth accounts with 400', async () => {
+      const { user: admin, workspace } = await seedWorkspace();
+      // Manually create a google-only user + member.
+      const googleUser = await prisma().user.create({
+        data: { email: 'g@example.com', name: 'G', authProvider: 'google', passwordHash: null },
+      });
+      const m = await prisma().workspaceMember.create({
+        data: { workspaceId: workspace.id, userId: googleUser.id, role: 'employee', isActive: true },
+      });
+
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members/${m.id}/rotate-password`)
+        .set(authHeader(admin.id, admin.email));
+      expect(res.status).toBe(400);
+    });
+
+    it('non-admin cannot rotate (403)', async () => {
+      const { workspace } = await seedWorkspace();
+      const { user: emp } = await createUser();
+      const empMember = await addMember(workspace.id, emp.id, 'employee');
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/workspaces/${workspace.id}/members/${empMember.id}/rotate-password`)
+        .set(authHeader(emp.id, emp.email));
+      expect(res.status).toBe(403);
+    });
+  });
+
   it('non-member cannot access the workspace (403)', async () => {
     const { workspace } = await seedWorkspace();
     const { user: outsider } = await createUser();
