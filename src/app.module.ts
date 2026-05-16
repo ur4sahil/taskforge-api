@@ -29,16 +29,38 @@ import { WorkersModule } from './workers/workers.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
 import { JwtAuthGuard } from './common/guards';
 
+function shouldSkipThrottle(ctx: any): boolean {
+  if (process.env.NODE_ENV === 'test') return true;
+  const secret = process.env.THROTTLE_BYPASS_SECRET;
+  if (!secret) return false;
+  // ThrottlerGuard passes its ExecutionContext; for the HTTP path, switchToHttp()
+  // exposes the request whose headers carry the bypass token.
+  try {
+    const req = ctx?.switchToHttp?.()?.getRequest?.();
+    const header = req?.headers?.['x-bypass-throttle'];
+    return typeof header === 'string' && header === secret;
+  } catch {
+    return false;
+  }
+}
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig] }),
     // Two throttler buckets: the global `default` (100/min) and a tight `auth`
     // bucket (5/min) for login + signup, applied per-route via @Throttle below.
-    // Both skip entirely in NODE_ENV=test so the in-memory tracker doesn't
-    // accumulate across the suite (auth.spec.ts hits /auth/signup 9 times).
+    //
+    // Skip conditions:
+    //   1. NODE_ENV=test — keeps the in-memory tracker from carrying state
+    //      across the API's own jest suite (auth.spec.ts hits /signup 9x).
+    //   2. `x-bypass-throttle` request header matching env.THROTTLE_BYPASS_SECRET
+    //      — lets the E2E suite (which legitimately creates many ephemeral users
+    //      against live prod) skip throttling without weakening real-world
+    //      brute-force protection. The secret is set on the VPS .env and
+    //      mirrored in Playwright's env at run time.
     ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 100, skipIf: () => process.env.NODE_ENV === 'test' },
-      { name: 'auth', ttl: 60_000, limit: 5, skipIf: () => process.env.NODE_ENV === 'test' },
+      { name: 'default', ttl: 60_000, limit: 100, skipIf: shouldSkipThrottle },
+      { name: 'auth', ttl: 60_000, limit: 5, skipIf: shouldSkipThrottle },
     ]),
     BullModule.forRootAsync({
       useFactory: () => {
