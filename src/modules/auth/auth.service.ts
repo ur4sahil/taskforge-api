@@ -92,6 +92,20 @@ export class AuthService {
     });
   }
 
+  /** Mint a fresh session for a user without going through login. Used by the
+   *  invitation accept flow so the invitee lands in their new workspace already
+   *  authenticated. Matches the return shape of login() exactly so the frontend
+   *  treats it like any other sign-in. */
+  async issueSessionForUser(user: { id: string; email: string; name: string; avatarUrl: string | null; authProvider: any }, ip?: string, ua?: string) {
+    const tokens = await this.generateTokens(user.id, user.email, ip, ua);
+    const workspaces = await this.getUserWorkspaces(user.id);
+    return {
+      ...tokens,
+      user: { id: user.id, email: user.email, name: user.name, avatarUrl: user.avatarUrl, authProvider: user.authProvider },
+      workspaces,
+    };
+  }
+
   private async generateTokens(userId: string, email: string, ip?: string, ua?: string) {
     const accessToken = this.jwt.sign(
       { sub: userId, email },

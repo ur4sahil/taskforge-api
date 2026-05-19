@@ -3,7 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
-import { appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig } from './config';
+import { appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig, emailConfig } from './config';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module';
@@ -27,6 +27,8 @@ import { PushModule } from './modules/push/push.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { WorkersModule } from './workers/workers.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
+import { EmailModule } from './common/email/email.module';
+import { InvitationsModule } from './modules/invitations/invitations.module';
 import { JwtAuthGuard } from './common/guards';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
@@ -47,7 +49,7 @@ function shouldSkipThrottle(ctx: any): boolean {
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig] }),
+    ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig, emailConfig] }),
     // Two throttler buckets: the global `default` (100/min) and a tight `auth`
     // bucket (5/min) for login + signup, applied per-route via @Throttle below.
     //
@@ -77,7 +79,8 @@ function shouldSkipThrottle(ctx: any): boolean {
       },
     }),
     PrismaModule,
-    AuthModule, WorkspacesModule, ListsModule, TasksModule, CommentsModule,
+    EmailModule,
+    AuthModule, WorkspacesModule, InvitationsModule, ListsModule, TasksModule, CommentsModule,
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,
     NotificationsModule, SearchModule, ViewsModule, ReportsModule,
     AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, PushModule, RealtimeModule, WorkersModule,

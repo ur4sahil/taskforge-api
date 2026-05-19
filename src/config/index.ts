@@ -58,3 +58,10 @@ export const aiConfig = registerAs('ai', () => ({
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   model: 'claude-sonnet-4-20250514',
 }));
+
+export const emailConfig = registerAs('email', () => ({
+  resendApiKey: process.env.RESEND_API_KEY || '',
+  fromAddress: process.env.EMAIL_FROM_ADDRESS || 'noreply@taskforge.housify365.com',
+  fromName: process.env.EMAIL_FROM_NAME || 'TaskForge',
+  inviteExpiryDays: parseInt(process.env.INVITE_EXPIRY_DAYS || '7', 10),
+}));

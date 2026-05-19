@@ -2,8 +2,8 @@ import { Controller, Post, Get, Patch, Body, Param, Query, Req, UseGuards } from
 import { SkipThrottle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { WorkspacesService } from './workspaces.service';
-import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, InviteMemberDto } from './dto';
-import { CurrentUser, CurrentMember, Roles } from '../../common/decorators';
+import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto } from './dto';
+import { CurrentUser, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
 import { successResponse, PaginationDto } from '../../common/dto/response.dto';
 
@@ -44,20 +44,6 @@ export class WorkspacesController {
   async members(@Param('wid') wid: string, @Query() p: PaginationDto) {
     const r = await this.svc.getMembers(wid, p.page, p.perPage);
     return successResponse(r.members, r.meta);
-  }
-
-  @Post(':wid/members')
-  @UseGuards(WorkspaceGuard, RolesGuard)
-  @Roles('admin')
-  async inviteMember(@Param('wid') wid: string, @Body() dto: InviteMemberDto, @CurrentMember() actor: any, @Req() req: Request) {
-    const result = await this.svc.inviteMember(wid, dto, actor.id);
-    (req as any).__auditData = {
-      action: 'member.invited',
-      entityType: 'workspaceMember',
-      entityId: result.member.id,
-      changes: { email: result.member.user?.email, role: result.member.role, isNewUser: result.isNewUser },
-    };
-    return successResponse(result);
   }
 
   @Patch(':wid/members/:mid')

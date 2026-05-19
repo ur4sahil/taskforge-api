@@ -75,158 +75,11 @@ describe('Workspaces', () => {
     expect(res.body.meta).toMatchObject({ total: 3, page: 1, totalPages: 1 });
   });
 
-  describe('POST /workspaces/:wid/members (invite)', () => {
-    it('creates a new user + member when email is unknown, returns tempPassword', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'newhire@example.com', name: 'New Hire', role: 'employee' });
-      expect(res.status).toBe(201);
-      expect(res.body.data.isNewUser).toBe(true);
-      expect(typeof res.body.data.tempPassword).toBe('string');
-      expect(res.body.data.tempPassword.length).toBeGreaterThanOrEqual(8);
-      expect(res.body.data.member).toMatchObject({
-        role: 'employee',
-        isActive: true,
-        user: { email: 'newhire@example.com', name: 'New Hire' },
-      });
-      // Member row must actually be linked to this workspace
-      const dbMember = await prisma().workspaceMember.findFirst({
-        where: { workspaceId: workspace.id, user: { email: 'newhire@example.com' } },
-      });
-      expect(dbMember).not.toBeNull();
-    });
-
-    it('links an existing user without creating a new one (tempPassword null)', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const { user: alice } = await createUser({ email: 'alice@example.com' });
-      const usersBefore = await prisma().user.count();
-
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'alice@example.com', name: 'Alice (ignored)', role: 'manager' });
-      expect(res.status).toBe(201);
-      expect(res.body.data.isNewUser).toBe(false);
-      expect(res.body.data.tempPassword).toBeNull();
-      expect(res.body.data.member.role).toBe('manager');
-      expect(res.body.data.member.userId).toBe(alice.id);
-
-      const usersAfter = await prisma().user.count();
-      expect(usersAfter).toBe(usersBefore); // no new user row created
-    });
-
-    it('returns 409 when user is already an active member', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const { user: alice } = await createUser({ email: 'alice@example.com' });
-      await addMember(workspace.id, alice.id, 'employee');
-
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'alice@example.com', name: 'Alice', role: 'employee' });
-      expect(res.status).toBe(409);
-    });
-
-    it('reactivates a previously-deactivated member instead of erroring', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const { user: alice } = await createUser({ email: 'alice@example.com' });
-      const existing = await addMember(workspace.id, alice.id, 'employee');
-      await prisma().workspaceMember.update({ where: { id: existing.id }, data: { isActive: false } });
-
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'alice@example.com', name: 'Alice', role: 'manager' });
-      expect(res.status).toBe(201);
-      expect(res.body.data.member.id).toBe(existing.id);
-      expect(res.body.data.member.isActive).toBe(true);
-      expect(res.body.data.member.role).toBe('manager');
-    });
-
-    it('rejects non-admin actors with 403', async () => {
-      const { workspace } = await seedWorkspace();
-      const { user: emp } = await createUser();
-      await addMember(workspace.id, emp.id, 'employee');
-
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(emp.id, emp.email))
-        .send({ email: 'someone@example.com', name: 'Someone', role: 'employee' });
-      expect(res.status).toBe(403);
-    });
-
-    it('sets WorkspaceMember.invitedBy to the inviting admin', async () => {
-      const { user, workspace, member } = await seedWorkspace();
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'who@example.com', name: 'New', role: 'employee' });
-      expect(res.status).toBe(201);
-      const row = await prisma().workspaceMember.findUnique({ where: { id: res.body.data.member.id } });
-      expect(row!.invitedBy).toBe(member.id);
-    });
-
-    it('writes an audit log entry for the invite', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'audit-test@example.com', name: 'A', role: 'manager' });
-      expect(res.status).toBe(201);
-      // Audit interceptor writes asynchronously after the response; small wait.
-      for (let i = 0; i < 10; i++) {
-        const logs = await prisma().auditLog.findMany({ where: { workspaceId: workspace.id, action: 'member.invited' } });
-        if (logs.length > 0) {
-          expect(logs[0].entityType).toBe('workspaceMember');
-          expect(logs[0].entityId).toBe(res.body.data.member.id);
-          const changes = logs[0].changes as any;
-          expect(changes.email).toBe('audit-test@example.com');
-          expect(changes.role).toBe('manager');
-          expect(changes.isNewUser).toBe(true);
-          return;
-        }
-        await new Promise(r => setTimeout(r, 50));
-      }
-      throw new Error('audit log row never appeared');
-    });
-
-    it('dispatches an `invite` notification visible to the new member', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'notify@example.com', name: 'Notify', role: 'employee' });
-      expect(res.status).toBe(201);
-      const notifs = await prisma().notification.findMany({
-        where: { workspaceId: workspace.id, recipientId: res.body.data.member.id, type: 'invite' },
-      });
-      expect(notifs.length).toBe(1);
-      expect(notifs[0].title).toMatch(/added to a workspace/i);
-    });
-
-    it('lowercases the email before lookup/storage', async () => {
-      const { user, workspace } = await seedWorkspace();
-      const res = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(user.id, user.email))
-        .send({ email: 'MixedCase@Example.COM', name: 'Mc', role: 'employee' });
-      expect(res.status).toBe(201);
-      expect(res.body.data.member.user.email).toBe('mixedcase@example.com');
-    });
-  });
-
   describe('POST /workspaces/:wid/members/:mid/rotate-password', () => {
     it('admin can rotate; returns new temp password; old password no longer logs in', async () => {
       const { user: admin, workspace } = await seedWorkspace();
-      // Invite to create a member with a known temp password.
-      const invite = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(admin.id, admin.email))
-        .send({ email: 'rotate-me@example.com', name: 'R', role: 'employee' });
-      const oldPw = invite.body.data.tempPassword as string;
-      const newMid = invite.body.data.member.id;
+      const { user: target, password: oldPw } = await createUser({ email: 'rotate-me@example.com' });
+      const newMid = (await addMember(workspace.id, target.id, 'employee')).id;
 
       // Old password works:
       const before = await request(app.getHttpServer())
@@ -252,12 +105,8 @@ describe('Workspaces', () => {
 
     it('rotation revokes all the user\'s active refresh tokens', async () => {
       const { user: admin, workspace } = await seedWorkspace();
-      const invite = await request(app.getHttpServer())
-        .post(`/api/v1/workspaces/${workspace.id}/members`)
-        .set(authHeader(admin.id, admin.email))
-        .send({ email: 'session-killed@example.com', name: 'S', role: 'employee' });
-      const oldPw = invite.body.data.tempPassword as string;
-      const newMid = invite.body.data.member.id;
+      const { user: target, password: oldPw } = await createUser({ email: 'session-killed@example.com' });
+      const newMid = (await addMember(workspace.id, target.id, 'employee')).id;
 
       // Log in once so a refresh token exists.
       const loginRes = await request(app.getHttpServer())
