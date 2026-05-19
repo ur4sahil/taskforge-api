@@ -305,7 +305,7 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
   /** Caller starts the call. We notify the target's personal room.
    *  Also writes a `call-start` system message into the conversation so the chat thread has a record. */
   @SubscribeMessage('call:invite')
-  async onInvite(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string; toMemberId: string }) {
+  async onInvite(@ConnectedSocket() socket: AuthedSocket, @MessageBody() body: { conversationId: string; toMemberId: string; audioOnly?: boolean }) {
     if (!socket.data.workspaceMemberId || !socket.data.workspaceId) return;
     // Verify both are in this conversation.
     const cnt = await this.prisma.conversationMember.count({
@@ -320,17 +320,21 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       { body: 'Call started' },
       'call-start',
     );
-    this.server.to(this.memberRoom(body.toMemberId)).emit('call:invite', {
-      conversationId: body.conversationId,
-      fromMemberId: socket.data.workspaceMemberId,
-    });
-    // High-priority push so the device rings even when the PWA is closed. Bypasses quiet hours
-    // and per-screen suppression — incoming calls must always reach the user.
+    // Look up caller name once. Used in both the socket emit (so the in-app
+    // banner shows the real name) and the push notification body below.
     const caller = await this.prisma.workspaceMember.findUnique({
       where: { id: socket.data.workspaceMemberId },
       include: { user: { select: { name: true } } },
     });
     const callerName = caller?.user?.name || 'Someone';
+    this.server.to(this.memberRoom(body.toMemberId)).emit('call:invite', {
+      conversationId: body.conversationId,
+      fromMemberId: socket.data.workspaceMemberId,
+      fromName: callerName,
+      audioOnly: body.audioOnly === true,
+    });
+    // High-priority push so the device rings even when the PWA is closed. Bypasses quiet hours
+    // and per-screen suppression — incoming calls must always reach the user.
     this.notifications.dispatch({
       workspaceId: socket.data.workspaceId,
       recipientMemberId: body.toMemberId,
