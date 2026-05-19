@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
 import { appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig, emailConfig } from './config';
 import { PrismaModule } from './prisma/prisma.module';
@@ -29,7 +29,7 @@ import { WorkersModule } from './workers/workers.module';
 import { ClientErrorsModule } from './modules/client-errors/client-errors.module';
 import { EmailModule } from './common/email/email.module';
 import { InvitationsModule } from './modules/invitations/invitations.module';
-import { JwtAuthGuard } from './common/guards';
+import { JwtAuthGuard, UserAwareThrottlerGuard } from './common/guards';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 
 function shouldSkipThrottle(ctx: any): boolean {
@@ -50,8 +50,14 @@ function shouldSkipThrottle(ctx: any): boolean {
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig, emailConfig] }),
-    // Two throttler buckets: the global `default` (100/min) and a tight `auth`
-    // bucket (5/min) for login + signup, applied per-route via @Throttle below.
+    // Two throttler buckets: the global `default` and a tight `auth` bucket
+    // (5/min) for login + signup, applied per-route via @Throttle below.
+    //
+    // The default bucket is high (600/min) because each user gets their own
+    // bucket via UserAwareThrottlerGuard (per-userId for authenticated routes,
+    // per-IP otherwise). An iOS PWA actively navigating + WebSocket fallback +
+    // periodic background fetches comfortably bursts 60-80 req/min for a single
+    // user, and the previous 100/min limit produced 429s on normal use.
     //
     // Skip conditions:
     //   1. NODE_ENV=test — keeps the in-memory tracker from carrying state
@@ -62,7 +68,7 @@ function shouldSkipThrottle(ctx: any): boolean {
     //      brute-force protection. The secret is set on the VPS .env and
     //      mirrored in Playwright's env at run time.
     ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 100, skipIf: shouldSkipThrottle },
+      { name: 'default', ttl: 60_000, limit: 600, skipIf: shouldSkipThrottle },
       { name: 'auth', ttl: 60_000, limit: 5, skipIf: shouldSkipThrottle },
     ]),
     BullModule.forRootAsync({
@@ -88,7 +94,7 @@ function shouldSkipThrottle(ctx: any): boolean {
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: UserAwareThrottlerGuard },
     // Global audit logger. Reads req.__auditData if a controller sets it on
     // success; controllers that don't set it just write no audit row. Matches
     // the behavior promised in the api CLAUDE.md.
