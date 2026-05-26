@@ -25,7 +25,22 @@ export class TasksService {
       const p = await this.prisma.task.findFirst({ where: { id: dto.parentTaskId, workspaceId: wid, parentTaskId: null } });
       if (!p) throw new BadRequestException('Invalid parent task');
     }
-    const assigneeId = dto.assigneeId || member.id;
+    // Assignee resolution order:
+    //   1. explicit dto.assigneeId (the user picked someone)
+    //   2. list.defaultAssigneeId (list-level automation rule)
+    //   3. the task creator (current fallback)
+    // The list default is skipped if its member has been deactivated since
+    // the rule was set — otherwise tasks would get auto-assigned to a
+    // disabled account and never reach anyone.
+    let assigneeId = dto.assigneeId || null;
+    if (!assigneeId) {
+      const list = await this.prisma.list.findFirst({
+        where: { id: lid, workspaceId: wid },
+        select: { defaultAssigneeId: true, defaultAssignee: { select: { isActive: true } } },
+      });
+      if (list?.defaultAssigneeId && list.defaultAssignee?.isActive) assigneeId = list.defaultAssigneeId;
+    }
+    if (!assigneeId) assigneeId = member.id;
     const task = await this.prisma.task.create({
       data: {
         workspaceId: wid, listId: lid, parentTaskId: dto.parentTaskId || null,
