@@ -86,13 +86,26 @@ export class ListsService {
     return list;
   }
 
-  async update(wid: string, lid: string, dto: UpdateListDto) {
+  async update(wid: string, lid: string, dto: UpdateListDto, member: any) {
+    await this.assertCanEditSettings(wid, lid, member);
     const data: any = {};
     if (dto.name !== undefined) data.name = dto.name;
     if (dto.description !== undefined) data.description = dto.description;
     if (dto.defaultAssigneeId !== undefined) data.defaultAssigneeId = dto.defaultAssigneeId;
     if (dto.inboundEmailEnabled !== undefined) data.inboundEmailEnabled = dto.inboundEmailEnabled;
     return this.prisma.list.update({ where: { id: lid }, data });
+  }
+
+  /** List settings (name, description, default assignee, inbound email) are
+   *  manageable by admins, managers (workspace-wide), and the list creator.
+   *  Plain employees can use the list but not reconfigure it. */
+  private async assertCanEditSettings(wid: string, lid: string, member: any) {
+    if (member.role === 'admin' || member.role === 'manager') return;
+    const list = await this.prisma.list.findFirst({ where: { id: lid, workspaceId: wid }, select: { createdById: true } });
+    if (!list) throw new NotFoundException('List not found');
+    if (list.createdById !== member.id) {
+      throw new ForbiddenException('Only the list creator, a manager, or an admin can edit list settings');
+    }
   }
 
   async remove(lid: string) {
@@ -146,8 +159,8 @@ export class ListsController {
   }
 
   @Patch(':lid')
-  async update(@Param('wid') wid: string, @Param('lid') lid: string, @Body() dto: UpdateListDto) {
-    return successResponse(await this.svc.update(wid, lid, dto));
+  async update(@Param('wid') wid: string, @Param('lid') lid: string, @Body() dto: UpdateListDto, @CurrentMember() m: any) {
+    return successResponse(await this.svc.update(wid, lid, dto, m));
   }
 
   @Delete(':lid')
