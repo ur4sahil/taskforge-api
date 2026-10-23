@@ -4,6 +4,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsModule, NotificationsService } from '../modules/notifications/notifications.module';
+import { workspaceTimezone, todayKey, daysLate } from '../common/utils/dates';
 
 @Processor('recurring-tasks')
 export class RecurringTaskProcessor extends WorkerHost {
@@ -73,31 +74,39 @@ export class OverdueProcessor extends WorkerHost {
   constructor(private prisma: PrismaService, private notifications: NotificationsService) { super(); }
   async process(job: Job) {
     // Notify once per task per day. We rely on the 'overdue' notification.type with a date stamp
-    // in metadata to dedupe — checked before dispatching.
-    const todayKey = new Date().toISOString().slice(0, 10);
-    const overdue = await this.prisma.task.findMany({
-      where: { status: { not: 'done' }, dueDate: { lt: new Date() }, deletedAt: null },
+    // in metadata to dedupe — checked before dispatching. The dedupe day is UTC;
+    // whether a task *is* overdue is judged against today in its workspace's
+    // timezone (a task due today is not overdue at 9 pm Eastern).
+    const dedupeDay = new Date().toISOString().slice(0, 10);
+    const wss = await this.prisma.workspace.findMany({ select: { id: true, settings: true } });
+    const todayByWs = new Map(wss.map(w => [w.id, todayKey(workspaceTimezone(w.settings))]));
+    // Superset by UTC (anything due before tomorrow), then the exact per-workspace check.
+    const candidates = await this.prisma.task.findMany({
+      where: { status: { not: 'done' }, dueDate: { lt: new Date(Date.now() + 86400000) }, deletedAt: null },
       select: { id: true, title: true, workspaceId: true, assigneeId: true, dueDate: true },
     });
-    for (const t of overdue) {
-      if (!t.assigneeId) continue;
+    for (const t of candidates) {
+      if (!t.assigneeId || !t.dueDate) continue;
+      const today = todayByWs.get(t.workspaceId);
+      if (!today) continue;
+      const late = daysLate(t.dueDate, today);
+      if (late <= 0) continue;
       const already = await this.prisma.notification.findFirst({
         where: {
           workspaceId: t.workspaceId, recipientId: t.assigneeId, type: 'overdue',
-          createdAt: { gte: new Date(todayKey) },
+          createdAt: { gte: new Date(dedupeDay) },
           data: { path: ['entityId'], equals: t.id },
         },
         select: { id: true },
       });
       if (already) continue;
-      const hrs = Math.round((Date.now() - (t.dueDate?.getTime() || 0)) / 3600000);
       await this.notifications.dispatch({
         workspaceId: t.workspaceId,
         recipientMemberId: t.assigneeId,
         channel: 'overdue',
         type: 'overdue',
         title: 'Task overdue',
-        body: `${t.title} — ${hrs}h late`,
+        body: `${t.title} — ${late} day${late === 1 ? '' : 's'} late`,
         url: `/?task=${t.id}`,
         entityType: 'task',
         entityId: t.id,

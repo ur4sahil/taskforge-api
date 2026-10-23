@@ -4,6 +4,7 @@ import { bootstrapApp } from '../fixtures/app';
 import { truncateAll, disconnect, prisma } from '../fixtures/db';
 import { seedWorkspace, createUser, addMember, createList } from '../fixtures/factories';
 import { authHeader } from '../fixtures/auth';
+import { todayKey, dateKeyToDb, DEFAULT_WORKSPACE_TIMEZONE } from '../../src/common/utils/dates';
 
 let app: INestApplication;
 beforeAll(async () => { app = await bootstrapApp(); });
@@ -12,11 +13,13 @@ beforeEach(async () => { await truncateAll(); });
 
 const srv = () => app.getHttpServer();
 
+// Due dates are calendar days in the workspace's timezone (default
+// America/New_York). Build them from that day, never from Date.now() instants.
+function dayOffset(n: number, tz = DEFAULT_WORKSPACE_TIMEZONE) {
+  return new Date(dateKeyToDb(todayKey(tz)).getTime() + n * 86400000);
+}
 function daysFromNow(n: number) { return new Date(Date.now() + n * 86400000); }
-// Local midnight today — matches the service's own `today` boundary. A bare
-// `new Date()` truncates to a UTC date that can roll into tomorrow under a
-// negative UTC offset, so "due today" must be pinned to local midnight.
-function todayLocal() { return new Date(new Date().setHours(0, 0, 0, 0)); }
+function todayLocal() { return dayOffset(0); }
 
 // Create a task with full control over status / dueDate / completedAt / assignee.
 async function task(opts: { workspaceId: string; listId: string; creatorId: string; assigneeId: string; status?: string; dueDate?: Date; completedAt?: Date }) {
@@ -39,8 +42,8 @@ describe('Reports — my-stats', () => {
     const { user, workspace, member, list } = await seedWorkspace();
     const base = { workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id };
 
-    await task({ ...base, status: 'todo', dueDate: daysFromNow(3) });                       // open, not overdue
-    await task({ ...base, status: 'in_progress', dueDate: daysFromNow(-3) });                // open + overdue
+    await task({ ...base, status: 'todo', dueDate: dayOffset(3) });                          // open, not overdue
+    await task({ ...base, status: 'in_progress', dueDate: dayOffset(-3) });                   // open + overdue
     await task({ ...base, status: 'todo', dueDate: todayLocal() });                          // open + dueToday
     await task({ ...base, status: 'done', completedAt: daysFromNow(-2) });                   // completed this week
     await task({ ...base, status: 'done', completedAt: daysFromNow(-20) });                  // completed, but >7d ago
@@ -50,6 +53,34 @@ describe('Reports — my-stats', () => {
       .set(authHeader(user.id, user.email));
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ open: 3, overdue: 1, dueToday: 1, completedThisWeek: 1 });
+  });
+
+  // Two workspaces 26 hours apart always disagree on what day it is, so the
+  // same calendar date is "today" in one and "yesterday"/"tomorrow" in the other.
+  it('judges overdue / due-today against the workspace timezone, not UTC', async () => {
+    const west = 'Etc/GMT+12'; // UTC-12
+    const east = 'Etc/GMT-14'; // UTC+14
+    const a = await seedWorkspace();
+    const b = await seedWorkspace();
+    await prisma().workspace.update({ where: { id: a.workspace.id }, data: { settings: { timezone: east } } });
+    await prisma().workspace.update({ where: { id: b.workspace.id }, data: { settings: { timezone: west } } });
+
+    // A task due on the western workspace's "today": that day is already over in the east.
+    const westToday = dateKeyToDb(todayKey(west));
+    await task({ workspaceId: a.workspace.id, listId: a.list.id, creatorId: a.member.id, assigneeId: a.member.id, dueDate: westToday });
+    await task({ workspaceId: b.workspace.id, listId: b.list.id, creatorId: b.member.id, assigneeId: b.member.id, dueDate: westToday });
+
+    const ra = await request(srv()).get(`/api/v1/workspaces/${a.workspace.id}/reports/my-stats`).set(authHeader(a.user.id, a.user.email));
+    const rb = await request(srv()).get(`/api/v1/workspaces/${b.workspace.id}/reports/my-stats`).set(authHeader(b.user.id, b.user.email));
+    expect(ra.body.data).toMatchObject({ overdue: 1, dueToday: 0 });
+    expect(rb.body.data).toMatchObject({ overdue: 0, dueToday: 1 });
+  });
+
+  it('a task due today is not overdue, whatever the hour', async () => {
+    const { user, workspace, member, list } = await seedWorkspace();
+    await task({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id, dueDate: todayLocal() });
+    const res = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/reports/my-stats`).set(authHeader(user.id, user.email));
+    expect(res.body.data).toMatchObject({ open: 1, overdue: 0, dueToday: 1 });
   });
 
   it('excludes soft-deleted tasks from counts', async () => {
@@ -102,7 +133,7 @@ describe('Reports — workspace', () => {
     const { user, workspace, member, list } = await seedWorkspace();
     const base = { workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id };
     await task({ ...base, status: 'todo' });
-    await task({ ...base, status: 'todo', dueDate: daysFromNow(-1) }); // overdue
+    await task({ ...base, status: 'todo', dueDate: dayOffset(-1) }); // overdue
     await task({ ...base, status: 'done' });
 
     const res = await request(srv())

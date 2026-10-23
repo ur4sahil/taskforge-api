@@ -11,6 +11,12 @@ import {
 } from '../../src/workers/workers.module';
 import { prisma, truncateAll, disconnect } from '../fixtures/db';
 import { seedWorkspace, createTask } from '../fixtures/factories';
+import { todayKey, dateKeyToDb, DEFAULT_WORKSPACE_TIMEZONE } from '../../src/common/utils/dates';
+
+// Overdue is judged by calendar day in the workspace timezone (default
+// America/New_York). "Now minus 24h" can still be today there, so build
+// yesterday from that calendar instead.
+function yesterdayInWorkspaceTz() { return new Date(dateKeyToDb(todayKey(DEFAULT_WORKSPACE_TIMEZONE)).getTime() - 86_400_000); }
 
 const fakeJob = { name: 'tick', data: {} } as any;
 class StubNotifications {
@@ -130,7 +136,7 @@ describe('ReminderProcessor', () => {
 describe('OverdueProcessor', () => {
   it('dispatches once per overdue task with an assignee', async () => {
     const { workspace, list, member } = await seedWorkspace();
-    await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id, dueDate: new Date(Date.now() - 86_400_000), title: 'Stale' });
+    await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id, dueDate: yesterdayInWorkspaceTz(), title: 'Stale' });
 
     const stub = new StubNotifications();
     await new OverdueProcessor(prisma() as any, stub as any).process(fakeJob);
@@ -140,7 +146,7 @@ describe('OverdueProcessor', () => {
 
   it('skips overdue tasks with no assignee', async () => {
     const { workspace, list, member } = await seedWorkspace();
-    await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: new Date(Date.now() - 86_400_000) });
+    await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: yesterdayInWorkspaceTz() });
     const stub = new StubNotifications();
     await new OverdueProcessor(prisma() as any, stub as any).process(fakeJob);
     expect(stub.dispatched).toHaveLength(0);
@@ -148,7 +154,7 @@ describe('OverdueProcessor', () => {
 
   it('dedupes — does not re-dispatch when an overdue notification already exists today', async () => {
     const { workspace, list, member } = await seedWorkspace();
-    const task = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id, dueDate: new Date(Date.now() - 86_400_000) });
+    const task = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, assigneeId: member.id, dueDate: yesterdayInWorkspaceTz() });
     await prisma().notification.create({
       data: {
         workspaceId: workspace.id, recipientId: member.id, type: 'overdue',

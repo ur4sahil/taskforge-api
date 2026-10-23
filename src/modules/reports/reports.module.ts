@@ -3,13 +3,23 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
 import { successResponse } from '../../common/dto/response.dto';
+import { workspaceTimezone, todayKey, dateKeyToDb } from '../../common/utils/dates';
 
 @Injectable()
 export class ReportsService {
   constructor(private prisma: PrismaService) {}
-  async personal(wid: string, mid: string) {
-    const today = new Date(new Date().setHours(0, 0, 0, 0));
+
+  /** "Today" as the workspace sees it — see common/utils/dates.ts. Overdue
+   *  means the due day is before today; due today means it is today. */
+  private async dayBounds(wid: string) {
+    const ws = await this.prisma.workspace.findUnique({ where: { id: wid }, select: { settings: true } });
+    const today = dateKeyToDb(todayKey(workspaceTimezone(ws?.settings)));
     const tomorrow = new Date(today.getTime() + 86400000);
+    return { today, tomorrow };
+  }
+
+  async personal(wid: string, mid: string, bounds?: { today: Date; tomorrow: Date }) {
+    const { today, tomorrow } = bounds ?? await this.dayBounds(wid);
     const weekAgo = new Date(Date.now() - 7 * 86400000);
     const [open, overdue, dueToday, done7d] = await Promise.all([
       this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null } }),
@@ -20,15 +30,17 @@ export class ReportsService {
     return { open, overdue, dueToday, completedThisWeek: done7d };
   }
   async team(wid: string, managerId: string) {
+    const bounds = await this.dayBounds(wid);
     const reports = await this.prisma.workspaceMember.findMany({ where: { workspaceId: wid, managerId, isActive: true }, include: { user: { select: { name: true } } } });
-    const stats = await Promise.all(reports.map(async (r: any) => ({ name: r.user.name, ...await this.personal(wid, r.id) })));
+    const stats = await Promise.all(reports.map(async (r: any) => ({ name: r.user.name, ...await this.personal(wid, r.id, bounds) })));
     return { teamSize: reports.length, members: stats, caveat: 'Task counts do not reflect quality or complexity of work.' };
   }
   async workspace(wid: string) {
+    const { today } = await this.dayBounds(wid);
     const [total, open, overdue, byStatus] = await Promise.all([
       this.prisma.task.count({ where: { workspaceId: wid, deletedAt: null } }),
       this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, deletedAt: null } }),
-      this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, dueDate: { lt: new Date() }, deletedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, dueDate: { lt: today }, deletedAt: null } }),
       this.prisma.task.groupBy({ by: ['status'], _count: true, where: { workspaceId: wid, deletedAt: null } }),
     ]);
     return { total, open, overdue, byStatus };
