@@ -21,8 +21,15 @@ const env = Object.fromEntries(
     .filter(l => l.includes('=') && !l.trim().startsWith('#'))
     .map(l => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim().replace(/^"|"$/g, '')]; }),
 );
-const need = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'BACKUP_R2_BUCKET'];
-const missing = need.filter(k => !env[k]);
+// The app's R2 token is scoped to the public attachments bucket only, so the
+// backups bucket normally gets its own bucket-scoped token (BACKUP_R2_*).
+// Fall back to the app token for setups where one token covers both.
+const accessKeyId = env.BACKUP_R2_ACCESS_KEY_ID || env.R2_ACCESS_KEY_ID;
+const secretAccessKey = env.BACKUP_R2_SECRET_ACCESS_KEY || env.R2_SECRET_ACCESS_KEY;
+const missing = [
+  ['R2_ACCOUNT_ID', env.R2_ACCOUNT_ID], ['BACKUP_R2_BUCKET', env.BACKUP_R2_BUCKET],
+  ['BACKUP_R2_ACCESS_KEY_ID or R2_ACCESS_KEY_ID', accessKeyId], ['BACKUP_R2_SECRET_ACCESS_KEY or R2_SECRET_ACCESS_KEY', secretAccessKey],
+].filter(([, v]) => !v).map(([k]) => k);
 if (missing.length) { console.error(`missing in .env: ${missing.join(', ')}`); process.exit(2); }
 
 const keepDays = parseInt(env.BACKUP_R2_KEEP_DAYS || '30', 10);
@@ -30,7 +37,7 @@ const bucket = env.BACKUP_R2_BUCKET;
 const s3 = new S3Client({
   region: 'auto',
   endpoint: `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: { accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY },
+  credentials: { accessKeyId, secretAccessKey },
 });
 
 const key = `taskforge/${basename(file)}`;
