@@ -120,6 +120,7 @@ export class MessagesService {
           createdAt: c.createdAt,
           createdById: c.createdById,
           mutedUntil: m.mutedUntil,
+          lastReadAt: m.lastReadAt,
           // For 1:1 the UI shows the "other" person; for groups it shows c.name and a stack of avatars.
           other: isGroup ? null : (others[0] || null),
           members: c.members.map((cm: any) => cm.workspaceMember),
@@ -393,7 +394,8 @@ export class MessagesService {
     );
 
     const truncate = (s: string) => s.length > 140 ? s.slice(0, 137) + '…' : s;
-    const url = `/messages?c=${cid}`;
+    // Slug-less like task urls (/?task=): the web root resolves it to the workspace.
+    const url = `/?c=${cid}`;
     const screen = `messages:${cid}`;
     const tag = `msg:${cid}`;
 

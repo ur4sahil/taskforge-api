@@ -342,7 +342,7 @@ export class CallGateway implements OnGatewayConnection, OnGatewayDisconnect {
       type: 'call_invite',
       title: `Incoming call`,
       body: `${callerName} is calling…`,
-      url: `/messages?c=${body.conversationId}`,
+      url: `/?c=${body.conversationId}`,
       entityType: 'conversation',
       entityId: body.conversationId,
       pushTag: `call:${body.conversationId}`,
