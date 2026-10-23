@@ -557,7 +557,7 @@ async function runMobileFlows() {
 async function runFlows() {
   await flow('create task from My Tasks', async () => {
     await goto(`${W}/my-tasks`);
-    await tap(page.getByRole('button', { name: 'Task', exact: true }).first(), { timeout: 10000 });
+    await tap(page.getByRole('button', { name: /^(New task|Task)$/ }).first(), { timeout: 10000 });
     await page.getByLabel('Task name').fill(TASK_TITLE, { timeout: 10000 });
     await tap(page.getByRole('button', { name: 'Create Task' }), { timeout: 10000 });
     await page.getByText(TASK_TITLE, { exact: true }).first().waitFor({ state: 'visible', timeout: 15000 });
