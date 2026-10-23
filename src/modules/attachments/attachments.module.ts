@@ -37,8 +37,12 @@ export class AttachmentsService {
     await this.storage.upload(storageKey, file.buffer, file.mimetype);
     return this.prisma.attachment.create({ data: { workspaceId: wid, taskId: tid, commentId: null, uploadedById: uid, fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype, storageKey } });
   }
+  /** Task attachments only (chat attachments are served by the messages module and
+   *  must not be fetchable here). The attachment AND its task must be in this workspace. */
   async getUrl(wid: string, aid: string) {
-    const a = await this.prisma.attachment.findFirst({ where: { id: aid, workspaceId: wid } });
+    const a = await this.prisma.attachment.findFirst({
+      where: { id: aid, workspaceId: wid, taskId: { not: null }, task: { workspaceId: wid } },
+    });
     if (!a) throw new NotFoundException('Not found');
     const url = await this.storage.getDownloadUrl(a.storageKey, a.fileName);
     return { url, fileName: a.fileName, mimeType: a.mimeType };

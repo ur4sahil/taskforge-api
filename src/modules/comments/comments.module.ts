@@ -85,7 +85,9 @@ export class CommentsService {
     await this.prisma.comment.delete({ where: { id: cid } });
   }
 
-  async findByTask(tid: string, page: number, perPage: number) {
+  async findByTask(wid: string, tid: string, page: number, perPage: number) {
+    const task = await this.prisma.task.findFirst({ where: { id: tid, workspaceId: wid }, select: { id: true } });
+    if (!task) throw new NotFoundException('Task not found');
     const [comments, total] = await Promise.all([
       this.prisma.comment.findMany({
         where: { taskId: tid },
@@ -102,7 +104,7 @@ export class CommentsService {
 export class CommentsController {
   constructor(private svc: CommentsService) {}
   @Post() async create(@Param('wid') w: string, @Param('tid') t: string, @Body() d: CreateCommentDto, @CurrentMember() m: any) { return successResponse(await this.svc.create(w, t, d, m.id)); }
-  @Get() async findAll(@Param('tid') t: string, @Query() p: PaginationDto) { const r = await this.svc.findByTask(t, p.page, p.perPage); return successResponse(r.comments, r.meta); }
+  @Get() async findAll(@Param('wid') w: string, @Param('tid') t: string, @Query() p: PaginationDto) { const r = await this.svc.findByTask(w, t, p.page, p.perPage); return successResponse(r.comments, r.meta); }
   @Delete(':cid') async remove(@Param('wid') w: string, @Param('tid') t: string, @Param('cid') c: string, @CurrentMember() m: any) {
     await this.svc.delete(w, t, c, m.id, m.role);
     return successResponse({ deleted: true });

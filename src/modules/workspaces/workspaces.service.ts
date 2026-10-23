@@ -66,7 +66,19 @@ export class WorkspacesService {
     if (!m) throw new NotFoundException('Member not found');
     const data: any = {};
     if (dto.role !== undefined) data.role = dto.role;
-    if (dto.managerId !== undefined) data.managerId = dto.managerId;
+    if (dto.managerId !== undefined) {
+      // A manager must be an active member of THIS workspace and not the member
+      // themself. null clears the manager.
+      if (dto.managerId !== null) {
+        if (dto.managerId === mid) throw new BadRequestException('A member cannot be their own manager');
+        const mgr = await this.prisma.workspaceMember.findFirst({
+          where: { id: dto.managerId, workspaceId: wid, isActive: true },
+          select: { id: true },
+        });
+        if (!mgr) throw new BadRequestException('managerId must be an active member of this workspace');
+      }
+      data.managerId = dto.managerId;
+    }
     if (dto.timezone !== undefined) data.timezone = dto.timezone;
     return this.prisma.workspaceMember.update({
       where: { id: mid },
@@ -105,7 +117,14 @@ export class WorkspacesService {
     return { tempPassword, email: member.user.email };
   }
 
+  /** 404 unless `mid` is a member row of workspace `wid`. */
+  private async assertMemberInWorkspace(wid: string, mid: string) {
+    const m = await this.prisma.workspaceMember.findFirst({ where: { id: mid, workspaceId: wid }, select: { id: true } });
+    if (!m) throw new NotFoundException('Member not found');
+  }
+
   async deactivateMember(wid: string, mid: string) {
+    await this.assertMemberInWorkspace(wid, mid);
     const open = await this.prisma.task.count({
       where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null },
     });
@@ -114,6 +133,7 @@ export class WorkspacesService {
   }
 
   async reactivateMember(wid: string, mid: string) {
+    await this.assertMemberInWorkspace(wid, mid);
     return this.prisma.workspaceMember.update({ where: { id: mid }, data: { isActive: true } });
   }
 }

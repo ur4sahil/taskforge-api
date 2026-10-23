@@ -93,27 +93,39 @@ export class ListsService {
     if (dto.description !== undefined) data.description = dto.description;
     if (dto.defaultAssigneeId !== undefined) data.defaultAssigneeId = dto.defaultAssigneeId;
     if (dto.inboundEmailEnabled !== undefined) data.inboundEmailEnabled = dto.inboundEmailEnabled;
-    return this.prisma.list.update({ where: { id: lid }, data });
+    // Scoped by workspace so an admin/manager of another workspace cannot update
+    // this row by guessing its id (assertCanEditSettings already 404s, this is belt+braces).
+    await this.prisma.list.updateMany({ where: { id: lid, workspaceId: wid }, data });
+    return this.prisma.list.findFirst({ where: { id: lid, workspaceId: wid } });
   }
 
   /** List settings (name, description, default assignee, inbound email) are
    *  manageable by admins, managers (workspace-wide), and the list creator.
-   *  Plain employees can use the list but not reconfigure it. */
+   *  Plain employees can use the list but not reconfigure it.
+   *  Always verifies the list belongs to `wid` first (404 otherwise) so no role
+   *  can reach a list in another workspace. */
   private async assertCanEditSettings(wid: string, lid: string, member: any) {
-    if (member.role === 'admin' || member.role === 'manager') return;
     const list = await this.prisma.list.findFirst({ where: { id: lid, workspaceId: wid }, select: { createdById: true } });
     if (!list) throw new NotFoundException('List not found');
+    if (member.role === 'admin' || member.role === 'manager') return;
     if (list.createdById !== member.id) {
       throw new ForbiddenException('Only the list creator, a manager, or an admin can edit list settings');
     }
   }
 
-  async remove(lid: string) {
-    await this.prisma.list.delete({ where: { id: lid } });
+  /** Same rule as PATCH (admin / manager / list creator). */
+  async remove(wid: string, lid: string, member: any) {
+    await this.assertCanEditSettings(wid, lid, member);
+    const { count } = await this.prisma.list.deleteMany({ where: { id: lid, workspaceId: wid } });
+    if (count === 0) throw new NotFoundException('List not found');
   }
 
-  async addMember(lid: string, wmid: string, member: any) {
-    await this.assertCanManageMembers(lid, member);
+  async addMember(wid: string, lid: string, wmid: string, member: any) {
+    await this.assertCanManageMembers(wid, lid, member);
+    // The member being added must belong to this workspace too — otherwise a
+    // foreign workspace member could be attached to one of our lists.
+    const target = await this.prisma.workspaceMember.findFirst({ where: { id: wmid, workspaceId: wid, isActive: true }, select: { id: true } });
+    if (!target) throw new NotFoundException('Member not found');
     return this.prisma.listMember.upsert({
       where: { listId_workspaceMemberId: { listId: lid, workspaceMemberId: wmid } },
       create: { listId: lid, workspaceMemberId: wmid, addedById: member.id },
@@ -121,16 +133,17 @@ export class ListsService {
     });
   }
 
-  async removeMember(lid: string, mid: string, member: any) {
-    await this.assertCanManageMembers(lid, member);
+  async removeMember(wid: string, lid: string, mid: string, member: any) {
+    await this.assertCanManageMembers(wid, lid, member);
     await this.prisma.listMember.deleteMany({ where: { listId: lid, workspaceMemberId: mid } });
   }
 
-  /** Admin can always manage. Non-admin must be the list creator. */
-  private async assertCanManageMembers(lid: string, member: any) {
-    if (member.role === 'admin') return;
-    const list = await this.prisma.list.findUnique({ where: { id: lid }, select: { createdById: true } });
+  /** Admin can always manage. Non-admin must be the list creator.
+   *  Always verifies the list belongs to `wid` first (404 otherwise). */
+  private async assertCanManageMembers(wid: string, lid: string, member: any) {
+    const list = await this.prisma.list.findFirst({ where: { id: lid, workspaceId: wid }, select: { createdById: true } });
     if (!list) throw new NotFoundException('List not found');
+    if (member.role === 'admin') return;
     if (list.createdById !== member.id) {
       throw new ForbiddenException('Only the list creator or an admin can manage members');
     }
@@ -164,19 +177,19 @@ export class ListsController {
   }
 
   @Delete(':lid')
-  async remove(@Param('lid') lid: string) {
-    await this.svc.remove(lid);
+  async remove(@Param('wid') wid: string, @Param('lid') lid: string, @CurrentMember() m: any) {
+    await this.svc.remove(wid, lid, m);
     return successResponse({ deleted: true });
   }
 
   @Post(':lid/members')
-  async addMember(@Param('lid') lid: string, @Body() dto: AddListMemberDto, @CurrentMember() m: any) {
-    return successResponse(await this.svc.addMember(lid, dto.workspaceMemberId, m));
+  async addMember(@Param('wid') wid: string, @Param('lid') lid: string, @Body() dto: AddListMemberDto, @CurrentMember() m: any) {
+    return successResponse(await this.svc.addMember(wid, lid, dto.workspaceMemberId, m));
   }
 
   @Delete(':lid/members/:mid')
-  async removeMember(@Param('lid') lid: string, @Param('mid') mid: string, @CurrentMember() m: any) {
-    await this.svc.removeMember(lid, mid, m);
+  async removeMember(@Param('wid') wid: string, @Param('lid') lid: string, @Param('mid') mid: string, @CurrentMember() m: any) {
+    await this.svc.removeMember(wid, lid, mid, m);
     return successResponse({ removed: true });
   }
 }

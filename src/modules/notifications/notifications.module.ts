@@ -1,4 +1,4 @@
-import { Injectable, Module, Controller, Get, Patch, Post, Body, Param, Query, UseGuards, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, Module, Controller, Get, Patch, Post, Body, Param, Query, UseGuards, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember } from '../../common/decorators';
 import { WorkspaceGuard } from '../../common/guards';
@@ -47,7 +47,12 @@ export class NotificationsService {
     return { notifications: n, meta: paginationMeta(t, page, perPage) };
   }
   async unreadCount(wid: string, rid: string) { return this.prisma.notification.count({ where: { workspaceId: wid, recipientId: rid, isRead: false } }); }
-  async markRead(nid: string) { return this.prisma.notification.update({ where: { id: nid }, data: { isRead: true, readAt: new Date() } }); }
+  /** Only the recipient may mark their own notification read; scoped to the workspace. */
+  async markRead(wid: string, nid: string, rid: string) {
+    const { count } = await this.prisma.notification.updateMany({ where: { id: nid, workspaceId: wid, recipientId: rid }, data: { isRead: true, readAt: new Date() } });
+    if (count === 0) throw new NotFoundException('Notification not found');
+    return this.prisma.notification.findFirst({ where: { id: nid, workspaceId: wid, recipientId: rid } });
+  }
   async markAllRead(wid: string, rid: string) { return this.prisma.notification.updateMany({ where: { workspaceId: wid, recipientId: rid, isRead: false }, data: { isRead: true, readAt: new Date() } }); }
 
   // ── Prefs ────────────────────────────────────────────────────────────────
@@ -171,7 +176,7 @@ export class NotificationsController {
     return successResponse(r.notifications, r.meta);
   }
   @Get('notifications/unread-count') async unread(@Param('wid') w: string, @CurrentMember() m: any) { return successResponse({ count: await this.svc.unreadCount(w, m.id) }); }
-  @Patch('notifications/:nid/read') async read(@Param('nid') n: string) { return successResponse(await this.svc.markRead(n)); }
+  @Patch('notifications/:nid/read') async read(@Param('wid') w: string, @Param('nid') n: string, @CurrentMember() m: any) { return successResponse(await this.svc.markRead(w, n, m.id)); }
   @Post('notifications/read-all') async readAll(@Param('wid') w: string, @CurrentMember() m: any) { await this.svc.markAllRead(w, m.id); return successResponse({ ok: true }); }
 
   @Get('notifications/prefs') async getPrefs(@CurrentMember() m: any) {

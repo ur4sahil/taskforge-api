@@ -21,6 +21,18 @@ export class TasksService {
   constructor(private prisma: PrismaService, private notifications: NotificationsService) {}
 
   async create(wid: string, lid: string, dto: CreateTaskDto, member: any) {
+    // The target list must live in this workspace (404 otherwise — never leak
+    // existence) and the caller must be able to see it (admins see all lists;
+    // managers/employees only lists they have access to, same rule as findAll).
+    const list = await this.prisma.list.findFirst({
+      where: { id: lid, workspaceId: wid },
+      select: { id: true, defaultAssigneeId: true, defaultAssignee: { select: { isActive: true } } },
+    });
+    if (!list) throw new NotFoundException('List not found');
+    if (member.role !== 'admin') {
+      const accessible = await this.getAccessibleListIds(wid, member);
+      if (!accessible.includes(lid)) throw new ForbiddenException('No access to this list');
+    }
     if (dto.parentTaskId) {
       const p = await this.prisma.task.findFirst({ where: { id: dto.parentTaskId, workspaceId: wid, parentTaskId: null } });
       if (!p) throw new BadRequestException('Invalid parent task');
@@ -33,13 +45,7 @@ export class TasksService {
     // the rule was set — otherwise tasks would get auto-assigned to a
     // disabled account and never reach anyone.
     let assigneeId = dto.assigneeId || null;
-    if (!assigneeId) {
-      const list = await this.prisma.list.findFirst({
-        where: { id: lid, workspaceId: wid },
-        select: { defaultAssigneeId: true, defaultAssignee: { select: { isActive: true } } },
-      });
-      if (list?.defaultAssigneeId && list.defaultAssignee?.isActive) assigneeId = list.defaultAssigneeId;
-    }
+    if (!assigneeId && list.defaultAssigneeId && list.defaultAssignee?.isActive) assigneeId = list.defaultAssigneeId;
     if (!assigneeId) assigneeId = member.id;
     const task = await this.prisma.task.create({
       data: {
@@ -185,38 +191,68 @@ export class TasksService {
     });
   }
 
+  /** Admin-only at the controller (RolesGuard); here we only make sure the task is ours. */
   async lock(wid: string, tid: string, mid: string) {
+    await this.findOne(wid, tid);
     return this.prisma.task.update({ where: { id: tid }, data: { isLocked: true, lockedById: mid, lockedAt: new Date() }, include: TASK_INCLUDE });
   }
 
   async unlock(wid: string, tid: string) {
+    await this.findOne(wid, tid);
     return this.prisma.task.update({ where: { id: tid }, data: { isLocked: false, lockedById: null, lockedAt: null }, include: TASK_INCLUDE });
   }
 
-  async restore(wid: string, tid: string) {
+  /** Whoever could delete the task may restore it. findOne does not filter on
+   *  deletedAt, so a soft-deleted task is still found here. */
+  async restore(wid: string, tid: string, member: any) {
+    const task = await this.findOne(wid, tid);
+    if (!this.getPerms(member, task).canDelete) throw new ForbiddenException('Cannot restore');
     return this.prisma.task.update({ where: { id: tid }, data: { deletedAt: null }, include: TASK_INCLUDE });
   }
 
-  async addChecklist(tid: string, dto: CreateChecklistItemDto) {
+  /** Loads the task (404 if not in this workspace) and enforces the checklist
+   *  permission: 'edit' (add / remove / reorder / rename) needs canFullEdit,
+   *  'toggle' (isChecked only) needs canToggleChecklist — mirroring how update()
+   *  treats a status-only patch vs a full edit. */
+  private async assertChecklistAccess(wid: string, tid: string, member: any, kind: 'edit' | 'toggle') {
+    const task = await this.findOne(wid, tid);
+    const perms = this.getPerms(member, task);
+    if (kind === 'edit' && !perms.canFullEdit) throw new ForbiddenException('Cannot edit checklist');
+    if (kind === 'toggle' && !perms.canToggleChecklist) throw new ForbiddenException('Cannot toggle checklist');
+    return task;
+  }
+
+  async addChecklist(wid: string, tid: string, dto: CreateChecklistItemDto, member: any) {
+    await this.assertChecklistAccess(wid, tid, member, 'edit');
     const max = await this.prisma.checklistItem.aggregate({ where: { taskId: tid }, _max: { sortOrder: true } });
     return this.prisma.checklistItem.create({ data: { taskId: tid, text: dto.text, sortOrder: (max._max.sortOrder ?? -1) + 1 } });
   }
 
-  async updateChecklist(cid: string, dto: UpdateChecklistItemDto) {
+  async updateChecklist(wid: string, tid: string, cid: string, dto: UpdateChecklistItemDto, member: any) {
+    const isToggleOnly = dto.text === undefined && dto.isChecked !== undefined;
+    await this.assertChecklistAccess(wid, tid, member, isToggleOnly ? 'toggle' : 'edit');
+    const item = await this.prisma.checklistItem.findFirst({ where: { id: cid, taskId: tid } });
+    if (!item) throw new NotFoundException('Checklist item not found');
     const data: any = {};
     if (dto.text !== undefined) data.text = dto.text;
     if (dto.isChecked !== undefined) data.isChecked = dto.isChecked;
     return this.prisma.checklistItem.update({ where: { id: cid }, data });
   }
 
-  async deleteChecklist(cid: string) {
-    await this.prisma.checklistItem.delete({ where: { id: cid } });
+  async deleteChecklist(wid: string, tid: string, cid: string, member: any) {
+    await this.assertChecklistAccess(wid, tid, member, 'edit');
+    const { count } = await this.prisma.checklistItem.deleteMany({ where: { id: cid, taskId: tid } });
+    if (count === 0) throw new NotFoundException('Checklist item not found');
   }
 
-  async reorderChecklist(tid: string, dto: ReorderChecklistDto) {
+  async reorderChecklist(wid: string, tid: string, dto: ReorderChecklistDto, member: any) {
+    await this.assertChecklistAccess(wid, tid, member, 'edit');
+    const ids = Array.from(new Set(dto.itemIds));
+    const owned = await this.prisma.checklistItem.count({ where: { id: { in: ids }, taskId: tid } });
+    if (owned !== ids.length) throw new BadRequestException('itemIds must all belong to this task');
     await this.prisma.$transaction(
-      dto.itemIds.map((id: string, i: number) =>
-        this.prisma.checklistItem.update({ where: { id }, data: { sortOrder: i } })
+      ids.map((id: string, i: number) =>
+        this.prisma.checklistItem.updateMany({ where: { id, taskId: tid }, data: { sortOrder: i } })
       )
     );
   }
@@ -301,31 +337,31 @@ export class TasksController {
   }
 
   @Post('tasks/:tid/restore')
-  async restore(@Param('wid') w: string, @Param('tid') t: string) {
-    return successResponse(await this.svc.restore(w, t));
+  async restore(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any) {
+    return successResponse(await this.svc.restore(w, t, m));
   }
 
   @Post('tasks/:tid/checklist')
-  async addChecklist(@Param('tid') t: string, @Body() d: CreateChecklistItemDto) {
-    return successResponse(await this.svc.addChecklist(t, d));
+  async addChecklist(@Param('wid') w: string, @Param('tid') t: string, @Body() d: CreateChecklistItemDto, @CurrentMember() m: any) {
+    return successResponse(await this.svc.addChecklist(w, t, d, m));
   }
 
   // Declare the literal-path /checklist/reorder BEFORE the wildcard /:cid match,
   // otherwise Nest routes it to updateChecklist with cid="reorder" → invalid UUID 500.
   @Patch('tasks/:tid/checklist/reorder')
-  async reorder(@Param('tid') t: string, @Body() d: ReorderChecklistDto) {
-    await this.svc.reorderChecklist(t, d);
+  async reorder(@Param('wid') w: string, @Param('tid') t: string, @Body() d: ReorderChecklistDto, @CurrentMember() m: any) {
+    await this.svc.reorderChecklist(w, t, d, m);
     return successResponse({ ok: true });
   }
 
   @Patch('tasks/:tid/checklist/:cid')
-  async updateChecklist(@Param('cid') c: string, @Body() d: UpdateChecklistItemDto) {
-    return successResponse(await this.svc.updateChecklist(c, d));
+  async updateChecklist(@Param('wid') w: string, @Param('tid') t: string, @Param('cid') c: string, @Body() d: UpdateChecklistItemDto, @CurrentMember() m: any) {
+    return successResponse(await this.svc.updateChecklist(w, t, c, d, m));
   }
 
   @Delete('tasks/:tid/checklist/:cid')
-  async deleteChecklist(@Param('cid') c: string) {
-    await this.svc.deleteChecklist(c);
+  async deleteChecklist(@Param('wid') w: string, @Param('tid') t: string, @Param('cid') c: string, @CurrentMember() m: any) {
+    await this.svc.deleteChecklist(w, t, c, m);
     return successResponse({ deleted: true });
   }
 }

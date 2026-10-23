@@ -50,14 +50,20 @@ export class TemplatesService {
     return { templates, meta: paginationMeta(total, page, perPage) };
   }
 
-  async findOne(wid: string, tid: string) {
-    const t = await this.prisma.template.findFirst({ where: { id: tid, workspaceId: wid } });
+  /** Mirrors findAll's visibility filter: workspace-visible templates are reachable
+   *  by every member, personal ones only by their creator. Admins may manage all.
+   *  A personal template of someone else yields 404 (it is invisible in findAll,
+   *  so we must not confirm it exists). */
+  async findOne(wid: string, tid: string, member: any) {
+    const where: any = { id: tid, workspaceId: wid };
+    if (member.role !== 'admin') where.OR = [{ visibility: 'workspace' }, { createdById: member.id }];
+    const t = await this.prisma.template.findFirst({ where });
     if (!t) throw new NotFoundException('Not found');
     return t;
   }
 
-  async update(wid: string, tid: string, d: any, mid: string) {
-    const t = await this.findOne(wid, tid);
+  async update(wid: string, tid: string, d: any, member: any) {
+    const t = await this.findOne(wid, tid, member);
     const h = (t.versionHistory as any[]) || [];
     h.unshift({ version: t.version, data: t.data, updatedAt: t.updatedAt });
     const data: any = { version: t.version + 1, versionHistory: h.slice(0, 5) as any };
@@ -67,16 +73,17 @@ export class TemplatesService {
     return this.prisma.template.update({ where: { id: tid }, data });
   }
 
-  async remove(wid: string, tid: string) { await this.findOne(wid, tid); await this.prisma.template.delete({ where: { id: tid } }); }
+  async remove(wid: string, tid: string, member: any) { await this.findOne(wid, tid, member); await this.prisma.template.delete({ where: { id: tid } }); }
 
-  async duplicate(wid: string, tid: string, mid: string) {
-    const t = await this.findOne(wid, tid);
+  async duplicate(wid: string, tid: string, member: any) {
+    const t = await this.findOne(wid, tid, member);
+    const mid = member.id;
     return this.prisma.template.create({
       data: { workspaceId: wid, type: t.type, name: `${t.name} (Copy)`, description: t.description, createdById: mid, visibility: 'personal' as any, data: t.data as any, version: 1, versionHistory: [] as any },
     });
   }
 
-  async getVersions(wid: string, tid: string) { const t = await this.findOne(wid, tid); return t.versionHistory; }
+  async getVersions(wid: string, tid: string, member: any) { const t = await this.findOne(wid, tid, member); return t.versionHistory; }
 
   /* ---------- Save-as-template (snapshot existing entities) ---------- */
 
@@ -131,7 +138,7 @@ export class TemplatesService {
 
   /** Create a new task in `listId` from a task template. */
   async applyTaskTemplate(wid: string, templateId: string, listId: string, member: any) {
-    const tmpl = await this.findOne(wid, templateId);
+    const tmpl = await this.findOne(wid, templateId, member);
     if (tmpl.type !== 'task') throw new BadRequestException('Template is not a task template');
     const list = await this.prisma.list.findFirst({ where: { id: listId, workspaceId: wid, archivedAt: null } });
     if (!list) throw new NotFoundException('Target list not found');
@@ -140,7 +147,7 @@ export class TemplatesService {
 
   /** Create a new list (with optional name override) from a list template, plus all its tasks. */
   async instantiateListTemplate(wid: string, templateId: string, member: any, overrideName?: string) {
-    const tmpl = await this.findOne(wid, templateId);
+    const tmpl = await this.findOne(wid, templateId, member);
     if (tmpl.type !== 'list') throw new BadRequestException('Template is not a list template');
     const data = tmpl.data as any as ListTemplateData;
     const domain = this.config.get<string>('app.inboundEmailDomain') || 'inbound.taskforge.io';
@@ -216,11 +223,11 @@ export class TemplatesController {
 
   @Post('templates') async create(@Param('wid') w: string, @Body() d: CreateTemplateDto, @CurrentMember() m: any) { return successResponse(await this.svc.create(w, d, m.id)); }
   @Get('templates') async findAll(@Param('wid') w: string, @CurrentMember() m: any, @Query() p: PaginationDto) { const r = await this.svc.findAll(w, m.id, p.page, p.perPage); return successResponse(r.templates, r.meta); }
-  @Get('templates/:tid') async findOne(@Param('wid') w: string, @Param('tid') t: string) { return successResponse(await this.svc.findOne(w, t)); }
-  @Patch('templates/:tid') async update(@Param('wid') w: string, @Param('tid') t: string, @Body() d: any, @CurrentMember() m: any) { return successResponse(await this.svc.update(w, t, d, m.id)); }
-  @Delete('templates/:tid') async remove(@Param('wid') w: string, @Param('tid') t: string) { await this.svc.remove(w, t); return successResponse({ deleted: true }); }
-  @Post('templates/:tid/duplicate') async dup(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any) { return successResponse(await this.svc.duplicate(w, t, m.id)); }
-  @Get('templates/:tid/versions') async versions(@Param('wid') w: string, @Param('tid') t: string) { return successResponse(await this.svc.getVersions(w, t)); }
+  @Get('templates/:tid') async findOne(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any) { return successResponse(await this.svc.findOne(w, t, m)); }
+  @Patch('templates/:tid') async update(@Param('wid') w: string, @Param('tid') t: string, @Body() d: any, @CurrentMember() m: any) { return successResponse(await this.svc.update(w, t, d, m)); }
+  @Delete('templates/:tid') async remove(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any) { await this.svc.remove(w, t, m); return successResponse({ deleted: true }); }
+  @Post('templates/:tid/duplicate') async dup(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any) { return successResponse(await this.svc.duplicate(w, t, m)); }
+  @Get('templates/:tid/versions') async versions(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any) { return successResponse(await this.svc.getVersions(w, t, m)); }
 
   // Snapshot existing entity → new template
   @Post('tasks/:tid/save-as-template')
