@@ -8,6 +8,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate:prod": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
+    "seed:demo": "ts-node prisma/seed-demo.ts",
     "test": "jest --forceExit",
     "test:unit": "jest test/unit --forceExit",
     "test:integration": "jest test/integration --forceExit",
