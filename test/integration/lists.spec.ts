@@ -48,6 +48,21 @@ describe('Lists', () => {
     expect(res.body.data.length).toBeGreaterThanOrEqual(3);
   });
 
+  // QA #10/#23/#50: lists are a directory → 200/page by default with meta.total.
+  it('GET / defaults to perPage 200 with meta.total and honours an explicit perPage', async () => {
+    const { user, workspace, member } = await seedWorkspace(); // seedWorkspace already made 1 list
+    for (let i = 0; i < 29; i++) await createList({ workspaceId: workspace.id, createdById: member.id });
+
+    const def = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/lists`).set(authHeader(user.id, user.email));
+    expect(def.status).toBe(200);
+    expect(def.body.data).toHaveLength(30);
+    expect(def.body.meta).toEqual({ page: 1, perPage: 200, total: 30, totalPages: 1 });
+
+    const small = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/lists?perPage=25`).set(authHeader(user.id, user.email));
+    expect(small.body.data).toHaveLength(25);
+    expect(small.body.meta).toEqual({ page: 1, perPage: 25, total: 30, totalPages: 2 });
+  });
+
   it('employee only sees lists they are explicitly a member of', async () => {
     const { user: admin, workspace } = await seedWorkspace();
     const adminMember = await prisma().workspaceMember.findFirstOrThrow({ where: { workspaceId: workspace.id, userId: admin.id } });

@@ -422,3 +422,152 @@ async function sendMessage(admin: { id: string; email: string }, workspaceId: st
   if (res.status !== 201) throw new Error(`sendMessage failed: ${res.status} ${JSON.stringify(res.body)}`);
   return res.body.data.id;
 }
+
+// ───────────────────────── Group management permissions (QA #48) ─────────────
+describe('Messages — group permissions', () => {
+  async function group(creator: any, wid: string, memberIds: string[], name = 'Team') {
+    const res = await request(app.getHttpServer())
+      .post(`/api/v1/workspaces/${wid}/conversations/group`)
+      .set(authHeader(creator.id, creator.email))
+      .send({ name, memberIds });
+    expect(res.status).toBe(201);
+    return res.body.data;
+  }
+
+  it('exposes createdById on create, list rows and after rename', async () => {
+    const { workspace, peers } = await setupWorkspaceWithPeers(3);
+    const [creator, p2, p3] = peers;
+    const g = await group(creator.user, workspace.id, [p2.member.id, p3.member.id]);
+    expect(g.createdById).toBe(creator.member.id);
+
+    const list = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/conversations`).set(authHeader(p2.user.id, p2.user.email));
+    expect(list.body.data.find((c: any) => c.id === g.id)).toMatchObject({ createdById: creator.member.id, isGroup: true, mutedUntil: null });
+
+    const renamed = await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}`)
+      .set(authHeader(creator.user.id, creator.user.email)).send({ name: 'Renamed' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.data).toMatchObject({ name: 'Renamed', createdById: creator.member.id });
+  });
+
+  it('rename: creator and workspace admin succeed; another member is 403', async () => {
+    const { user: adminUser, workspace, peers } = await setupWorkspaceWithPeers(3);
+    const [creator, p2, p3] = peers;
+    const g = await group(creator.user, workspace.id, [p2.member.id, p3.member.id]);
+    const admin = await seedAdminMemberId(workspace.id, adminUser.id);
+    // Admin is not a participant yet → participation is still required.
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}`)
+      .set(authHeader(adminUser.id, adminUser.email)).send({ name: 'Nope' }).expect(403);
+    await prisma().conversationMember.create({ data: { conversationId: g.id, workspaceMemberId: admin } });
+
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}`)
+      .set(authHeader(p2.user.id, p2.user.email)).send({ name: 'Hijack' }).expect(403);
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}`)
+      .set(authHeader(adminUser.id, adminUser.email)).send({ name: 'By admin' }).expect(200);
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}`)
+      .set(authHeader(creator.user.id, creator.user.email)).send({ name: 'By creator' }).expect(200);
+    expect((await prisma().conversation.findUnique({ where: { id: g.id } }))!.name).toBe('By creator');
+  });
+
+  it('add member: only creator or admin; others 403 and nothing is added', async () => {
+    const { user: adminUser, workspace, peers } = await setupWorkspaceWithPeers(4);
+    const [creator, p2, p3, outsider] = peers;
+    const g = await group(creator.user, workspace.id, [p2.member.id, p3.member.id]);
+    const denied = await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}/members`)
+      .set(authHeader(p2.user.id, p2.user.email)).send({ workspaceMemberId: outsider.member.id });
+    expect(denied.status).toBe(403);
+    expect(await prisma().conversationMember.count({ where: { conversationId: g.id } })).toBe(3);
+
+    await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}/members`)
+      .set(authHeader(creator.user.id, creator.user.email)).send({ workspaceMemberId: outsider.member.id }).expect(201);
+    expect(await prisma().conversationMember.count({ where: { conversationId: g.id } })).toBe(4);
+
+    // Admin (participant) can add too.
+    const admin = await seedAdminMemberId(workspace.id, adminUser.id);
+    await prisma().conversationMember.create({ data: { conversationId: g.id, workspaceMemberId: admin } });
+    const { user: fifth } = await createUser();
+    const fifthM = await addMember(workspace.id, fifth.id, 'employee');
+    await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${g.id}/members`)
+      .set(authHeader(adminUser.id, adminUser.email)).send({ workspaceMemberId: fifthM.id }).expect(201);
+  });
+
+  it('remove member: anyone may leave; removing someone else needs creator or admin', async () => {
+    const { user: adminUser, workspace, peers } = await setupWorkspaceWithPeers(4);
+    const [creator, p2, p3, p4] = peers;
+    const g = await group(creator.user, workspace.id, [p2.member.id, p3.member.id, p4.member.id]);
+    const url = (mid: string) => `/api/v1/workspaces/${workspace.id}/conversations/${g.id}/members/${mid}`;
+
+    // p2 cannot kick p3.
+    await request(app.getHttpServer()).delete(url(p3.member.id)).set(authHeader(p2.user.id, p2.user.email)).expect(403);
+    expect(await prisma().conversationMember.count({ where: { conversationId: g.id, workspaceMemberId: p3.member.id } })).toBe(1);
+    // p2 can leave.
+    await request(app.getHttpServer()).delete(url(p2.member.id)).set(authHeader(p2.user.id, p2.user.email)).expect(200);
+    expect(await prisma().conversationMember.count({ where: { conversationId: g.id, workspaceMemberId: p2.member.id } })).toBe(0);
+    // Creator can kick p3.
+    await request(app.getHttpServer()).delete(url(p3.member.id)).set(authHeader(creator.user.id, creator.user.email)).expect(200);
+    // Admin (once a participant) can kick p4.
+    const admin = await seedAdminMemberId(workspace.id, adminUser.id);
+    await prisma().conversationMember.create({ data: { conversationId: g.id, workspaceMemberId: admin } });
+    await request(app.getHttpServer()).delete(url(p4.member.id)).set(authHeader(adminUser.id, adminUser.email)).expect(200);
+    expect(await prisma().conversationMember.count({ where: { conversationId: g.id } })).toBe(2);
+  });
+
+  it('legacy group with no createdById: only an admin can manage it', async () => {
+    const { user: adminUser, workspace, peers } = await setupWorkspaceWithPeers(2);
+    const admin = await seedAdminMemberId(workspace.id, adminUser.id);
+    const conv = await prisma().conversation.create({ data: { workspaceId: workspace.id, name: 'Old', createdById: null,
+      members: { create: [admin, peers[0].member.id, peers[1].member.id].map(id => ({ workspaceMemberId: id })) } } });
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${conv.id}`)
+      .set(authHeader(peers[0].user.id, peers[0].user.email)).send({ name: 'X' }).expect(403);
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${workspace.id}/conversations/${conv.id}`)
+      .set(authHeader(adminUser.id, adminUser.email)).send({ name: 'X' }).expect(200);
+  });
+
+  it('an admin of another workspace cannot touch the group (403, not a participant)', async () => {
+    const { user: adminUser, workspace, peers } = await setupWorkspaceWithPeers(2);
+    const adminMid = await seedAdminMemberId(workspace.id, adminUser.id);
+    const g = await group(peers[0].user, workspace.id, [peers[1].member.id, adminMid]);
+    const other = await seedWorkspace();
+    await request(app.getHttpServer()).patch(`/api/v1/workspaces/${other.workspace.id}/conversations/${g.id}`)
+      .set(authHeader(other.user.id, other.user.email)).send({ name: 'X' }).expect(403);
+    expect((await prisma().conversation.findUnique({ where: { id: g.id } }))!.name).toBe('Team');
+  });
+});
+
+// ───────────────────────── Mute durations (QA #47) ───────────────────────────
+describe('Messages — mute { until }', () => {
+  it('{ until: ISO } mutes, { until: null } unmutes, and the list row reflects mutedUntil', async () => {
+    const { user: admin, workspace, peers } = await setupWorkspaceWithPeers(1);
+    const cid = await createDm(admin, workspace.id, peers[0].member.id);
+    const until = new Date(Date.now() + 8 * 3600_000).toISOString();
+
+    const on = await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${cid}/mute`)
+      .set(authHeader(admin.id, admin.email)).send({ until });
+    expect(on.status).toBe(201);
+    expect(on.body.data.mutedUntil).toBe(until);
+    let rows = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/conversations`).set(authHeader(admin.id, admin.email));
+    expect(rows.body.data.find((c: any) => c.id === cid).mutedUntil).toBe(until);
+
+    const off = await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${cid}/mute`)
+      .set(authHeader(admin.id, admin.email)).send({ until: null });
+    expect(off.status).toBe(201);
+    expect(off.body.data.mutedUntil).toBeNull();
+    rows = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/conversations`).set(authHeader(admin.id, admin.email));
+    expect(rows.body.data.find((c: any) => c.id === cid).mutedUntil).toBeNull();
+  });
+
+  it('still accepts the legacy { mutedUntil } spelling and rejects a non-ISO value with 400', async () => {
+    const { user: admin, workspace, peers } = await setupWorkspaceWithPeers(1);
+    const cid = await createDm(admin, workspace.id, peers[0].member.id);
+    const until = new Date(Date.now() + 3600_000).toISOString();
+    const legacy = await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${cid}/mute`)
+      .set(authHeader(admin.id, admin.email)).send({ mutedUntil: until });
+    expect(legacy.status).toBe(201);
+    expect(legacy.body.data.mutedUntil).toBe(until);
+
+    const bad = await request(app.getHttpServer()).post(`/api/v1/workspaces/${workspace.id}/conversations/${cid}/mute`)
+      .set(authHeader(admin.id, admin.email)).send({ until: 'tomorrow-ish' });
+    expect(bad.status).toBe(400);
+    const row = await prisma().conversationMember.findFirst({ where: { conversationId: cid, workspaceMember: { userId: admin.id } } });
+    expect(row!.mutedUntil!.toISOString()).toBe(until); // unchanged by the rejected request
+  });
+});

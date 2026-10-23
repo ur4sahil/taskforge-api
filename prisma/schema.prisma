@@ -25,9 +25,9 @@ model User {
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 
-  refreshTokens    RefreshToken[]
+  refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
-  workspaceMembers WorkspaceMember[]
+  workspaceMembers    WorkspaceMember[]
 
   @@map("users")
 }
@@ -107,29 +107,30 @@ model WorkspaceMember {
   createdAt               DateTime      @default(now()) @map("created_at")
   updatedAt               DateTime      @updatedAt @map("updated_at")
 
-  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  manager          WorkspaceMember?  @relation("ManagerRelation", fields: [managerId], references: [id])
-  reports          WorkspaceMember[] @relation("ManagerRelation")
-  createdTasks     Task[]            @relation("TaskCreator")
-  assignedTasks    Task[]            @relation("TaskAssignee")
-  lockedTasks      Task[]            @relation("TaskLocker")
-  comments         Comment[]
-  attachments      Attachment[]      @relation("AttachmentUploader")
-  reminders        Reminder[]
-  notifications    Notification[]
-  deviceTokens     DeviceToken[]
-  listMembers      ListMember[]
-  createdLists     List[]            @relation("ListCreator")
-  defaultForLists  List[]            @relation("ListDefaultAssignee")
-  addedToLists     ListMember[]      @relation("ListMemberAdder")
-  createdTemplates Template[]
-  createdViews     SavedView[]
-  auditLogs        AuditLog[]        @relation("AuditActor")
+  workspace               Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user                    User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  manager                 WorkspaceMember?     @relation("ManagerRelation", fields: [managerId], references: [id])
+  reports                 WorkspaceMember[]    @relation("ManagerRelation")
+  createdTasks            Task[]               @relation("TaskCreator")
+  assignedTasks           Task[]               @relation("TaskAssignee")
+  lockedTasks             Task[]               @relation("TaskLocker")
+  comments                Comment[]
+  attachments             Attachment[]         @relation("AttachmentUploader")
+  reminders               Reminder[]
+  notifications           Notification[]
+  deviceTokens            DeviceToken[]
+  listMembers             ListMember[]
+  createdLists            List[]               @relation("ListCreator")
+  defaultForLists         List[]               @relation("ListDefaultAssignee")
+  addedToLists            ListMember[]         @relation("ListMemberAdder")
+  createdTemplates        Template[]
+  createdViews            SavedView[]
+  auditLogs               AuditLog[]           @relation("AuditActor")
   conversationMemberships ConversationMember[]
-  sentMessages     Message[]          @relation("MessageSender")
-  messageReactions MessageReaction[]
-  pushSubscriptions PushSubscription[]
+  createdConversations    Conversation[]       @relation("ConversationCreator")
+  sentMessages            Message[]            @relation("MessageSender")
+  messageReactions        MessageReaction[]
+  pushSubscriptions       PushSubscription[]
 
   @@unique([workspaceId, userId])
   @@index([workspaceId])
@@ -258,13 +259,13 @@ model Task {
   createdAt    DateTime     @default(now()) @map("created_at")
   updatedAt    DateTime     @updatedAt @map("updated_at")
 
-  workspace      Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  list           List             @relation(fields: [listId], references: [id], onDelete: Cascade)
-  parentTask     Task?            @relation("SubtaskRelation", fields: [parentTaskId], references: [id])
-  subtasks       Task[]           @relation("SubtaskRelation")
-  creator        WorkspaceMember  @relation("TaskCreator", fields: [creatorId], references: [id])
-  assignee       WorkspaceMember? @relation("TaskAssignee", fields: [assigneeId], references: [id])
-  lockedBy       WorkspaceMember? @relation("TaskLocker", fields: [lockedById], references: [id])
+  workspace      Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  list           List               @relation(fields: [listId], references: [id], onDelete: Cascade)
+  parentTask     Task?              @relation("SubtaskRelation", fields: [parentTaskId], references: [id])
+  subtasks       Task[]             @relation("SubtaskRelation")
+  creator        WorkspaceMember    @relation("TaskCreator", fields: [creatorId], references: [id])
+  assignee       WorkspaceMember?   @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  lockedBy       WorkspaceMember?   @relation("TaskLocker", fields: [lockedById], references: [id])
   checklistItems ChecklistItem[]
   comments       Comment[]
   attachments    Attachment[]
@@ -300,6 +301,7 @@ model TaskEmailMetadata {
   createdAt   DateTime @default(now()) @map("created_at")
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
   @@map("task_email_metadata")
 }
 
@@ -311,6 +313,7 @@ model ChecklistItem {
   sortOrder Int     @default(0) @map("sort_order")
 
   task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
   @@index([taskId])
   @@map("checklist_items")
 }
@@ -337,6 +340,7 @@ model Mention {
   mentionedMemberId String @map("mentioned_member_id") @db.Uuid
 
   comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
   @@index([commentId])
   @@index([mentionedMemberId])
   @@map("mentions")
@@ -424,10 +428,11 @@ model TaskInstance {
 
   recurrenceRule RecurrenceRule @relation(fields: [recurrenceRuleId], references: [id], onDelete: Cascade)
   task           Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  @@index([recurrenceRuleId])
+
   // One instance per rule per day: the generator's check-then-insert is not
   // atomic, so this is what actually prevents duplicate occurrences.
   @@unique([recurrenceRuleId, occurrenceDate])
+  @@index([recurrenceRuleId])
   @@map("task_instances")
 }
 
@@ -457,6 +462,7 @@ model Reminder {
 
   task            Task            @relation(fields: [taskId], references: [id], onDelete: Cascade)
   workspaceMember WorkspaceMember @relation(fields: [workspaceMemberId], references: [id], onDelete: Cascade)
+
   @@index([taskId])
   @@index([workspaceMemberId])
   @@map("reminders")
@@ -476,6 +482,7 @@ model Notification {
 
   workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   recipient WorkspaceMember @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
   @@index([recipientId, createdAt])
   @@map("notifications")
 }
@@ -506,6 +513,7 @@ model Template {
 
   workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy WorkspaceMember @relation(fields: [createdById], references: [id])
+
   @@index([workspaceId])
   @@map("templates")
 }
@@ -536,6 +544,7 @@ model SavedView {
 
   workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy WorkspaceMember @relation(fields: [createdById], references: [id])
+
   @@index([workspaceId])
   @@map("saved_views")
 }
@@ -553,7 +562,8 @@ model AuditLog {
   createdAt   DateTime @default(now()) @map("created_at")
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  actor     WorkspaceMember?  @relation("AuditActor", fields: [actorId], references: [id])
+  actor     WorkspaceMember? @relation("AuditActor", fields: [actorId], references: [id])
+
   @@index([workspaceId, createdAt])
   @@index([entityType, entityId])
   @@index([actorId])
@@ -565,10 +575,14 @@ model Conversation {
   workspaceId   String    @map("workspace_id") @db.Uuid
   // Null for 1:1 DMs (UI derives the title from the other member). Set for groups.
   name          String?   @db.VarChar(120)
+  // Who created the conversation. Only they (or a workspace admin) may rename a
+  // group or add/remove its members. Null for conversations predating the column.
+  createdById   String?   @map("created_by_id") @db.Uuid
   createdAt     DateTime  @default(now()) @map("created_at")
   lastMessageAt DateTime? @map("last_message_at")
 
   workspace Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy WorkspaceMember?     @relation("ConversationCreator", fields: [createdById], references: [id], onDelete: SetNull)
   members   ConversationMember[]
   messages  Message[]
 
@@ -596,33 +610,33 @@ model ConversationMember {
 }
 
 model Message {
-  id             String    @id @default(uuid()) @db.Uuid
-  conversationId String    @map("conversation_id") @db.Uuid
-  senderId       String    @map("sender_id") @db.Uuid
-  body           String    @db.Text
-  kind           String    @default("text") @db.VarChar(20)
+  id              String    @id @default(uuid()) @db.Uuid
+  conversationId  String    @map("conversation_id") @db.Uuid
+  senderId        String    @map("sender_id") @db.Uuid
+  body            String    @db.Text
+  kind            String    @default("text") @db.VarChar(20)
   // Reply to another message in the same conversation.
-  replyToId      String?   @map("reply_to_id") @db.Uuid
+  replyToId       String?   @map("reply_to_id") @db.Uuid
   // Original message this one forwards. Points across conversations.
-  forwardedFromId String?  @map("forwarded_from_id") @db.Uuid
+  forwardedFromId String?   @map("forwarded_from_id") @db.Uuid
   // Pinned to the top of the conversation (per-conv pin board).
-  isPinned       Boolean   @default(false) @map("is_pinned")
+  isPinned        Boolean   @default(false) @map("is_pinned")
   // Soft-delete: keep the row for thread integrity but blank the body in UI.
-  deletedAt      DateTime? @map("deleted_at")
+  deletedAt       DateTime? @map("deleted_at")
   // OpenGraph metadata for the first URL detected in the body. Populated async after send.
   // Shape: { url, title?, description?, image?, siteName? }
-  linkPreview    Json?     @map("link_preview")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  editedAt       DateTime? @map("edited_at")
+  linkPreview     Json?     @map("link_preview")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  editedAt        DateTime? @map("edited_at")
 
-  conversation Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       WorkspaceMember    @relation("MessageSender", fields: [senderId], references: [id])
-  replyTo      Message?           @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
-  replies      Message[]          @relation("MessageReply")
+  conversation  Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender        WorkspaceMember   @relation("MessageSender", fields: [senderId], references: [id])
+  replyTo       Message?          @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies       Message[]         @relation("MessageReply")
   forwardedFrom Message?          @relation("MessageForward", fields: [forwardedFromId], references: [id], onDelete: SetNull)
-  forwardedAs  Message[]          @relation("MessageForward")
-  attachments  Attachment[]
-  reactions    MessageReaction[]
+  forwardedAs   Message[]         @relation("MessageForward")
+  attachments   Attachment[]
+  reactions     MessageReaction[]
 
   @@index([conversationId, createdAt])
   @@index([replyToId])

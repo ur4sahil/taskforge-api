@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
-import { successResponse, PaginationDto, paginationMeta } from '../../common/dto/response.dto';
+import { successResponse, WidePaginationDto, paginationMeta } from '../../common/dto/response.dto';
 import { generateInboundEmail } from '../../common/utils/slug';
 
 export class CreateListDto {
@@ -160,8 +160,9 @@ export class ListsController {
     return successResponse(await this.svc.create(wid, dto, m));
   }
 
+  // Directory listing: 200/page by default (max 500); meta.total reports the full count.
   @Get()
-  async findAll(@Param('wid') wid: string, @CurrentMember() m: any, @Query() p: PaginationDto) {
+  async findAll(@Param('wid') wid: string, @CurrentMember() m: any, @Query() p: WidePaginationDto) {
     const r = await this.svc.findAll(wid, m, p.page, p.perPage);
     return successResponse(r.lists, r.meta);
   }

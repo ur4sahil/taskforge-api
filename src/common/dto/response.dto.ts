@@ -6,6 +6,13 @@ export class PaginationDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(500) perPage: number = 25;
 }
 
+/** Directory-style listings (workspace members, lists) are small and the web
+ *  needs them whole for pickers and sidebars, so they default to 200 rows a
+ *  page. Everything else keeps PaginationDto's default of 25. */
+export class WidePaginationDto extends PaginationDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(500) perPage: number = 200;
+}
+
 export interface PaginationMeta {
   page: number; perPage: number; total: number; totalPages: number;
 }

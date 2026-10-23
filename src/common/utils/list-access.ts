@@ -30,6 +30,21 @@ export async function getAccessibleListIds(prisma: PrismaLike, wid: string, memb
   return (await prisma.listMember.findMany({ where: { workspaceMemberId: member.id, list: { workspaceId: wid } }, select: { listId: true } })).map((l: any) => l.listId);
 }
 
+/** Same rule as `listScope`, expressed as a relation filter on `task.list` so
+ *  it rides inside the caller's own query instead of resolving list ids first
+ *  (saves one round trip for employees, two for managers). Use it for hot
+ *  read paths (search); `listScope` remains for callers that need the ids. */
+export function listScopeWhere(wid: string, member: { id: string; role: string }): { list?: any } {
+  if (member.role === 'admin') return {};
+  if (member.role === 'manager') {
+    return { list: { workspaceId: wid, members: { some: { OR: [
+      { workspaceMemberId: member.id },
+      { workspaceMember: { managerId: member.id, workspaceId: wid } },
+    ] } } } };
+  }
+  return { list: { workspaceId: wid, members: { some: { workspaceMemberId: member.id } } } };
+}
+
 /** Prisma `where` fragment restricting tasks to lists the member may see.
  *  Admins get no restriction (empty fragment). */
 export async function listScope(prisma: PrismaLike, wid: string, member: { id: string; role: string }): Promise<{ listId?: { in: string[] } }> {

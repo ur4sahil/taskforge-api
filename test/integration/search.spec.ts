@@ -75,7 +75,7 @@ describe('Search', () => {
     const res = await request(srv())
       .get(`/api/v1/workspaces/${workspace.id}/search?q=`)
       .set(authHeader(user.id, user.email));
-    expect(res.body.data).toEqual({ tasks: [], comments: [] });
+    expect(res.body.data).toEqual({ tasks: [], comments: [], totals: { tasks: 0, comments: 0 } });
   });
 
   it('rejects unauthenticated access with 401', async () => {
@@ -139,5 +139,99 @@ describe('Search — scoping', () => {
     expect(tasks.body.data.tasks.map((t: any) => t.id)).toEqual([live.id]);
     const comments = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=sprocket`).set(authHeader(user.id, user.email));
     expect(comments.body.data.comments.map((c: any) => c.task.id)).toEqual([live.id]);
+  });
+});
+
+// ───────────────────────── Caps, meta, single-query scope (QA #32) ───────────
+describe('Search — caps and scope', () => {
+  it('caps tasks at 25 per page and comments at 25, reporting full totals and meta', async () => {
+    const { user, workspace, member, list } = await seedWorkspace();
+    for (let i = 0; i < 30; i++) await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, title: `capme ${i}` });
+    const t = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, title: 'host' });
+    await prisma().comment.createMany({ data: Array.from({ length: 28 }, (_, i) => ({ taskId: t.id, authorId: member.id, body: `capme comment ${i}` })) });
+
+    const res = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=capme&perPage=100`).set(authHeader(user.id, user.email));
+    expect(res.status).toBe(200);
+    expect(res.body.data.tasks).toHaveLength(25);
+    expect(res.body.data.comments).toHaveLength(25);
+    expect(res.body.data.totals).toEqual({ tasks: 30, comments: 28 });
+    expect(res.body.meta).toEqual({ page: 1, perPage: 25, total: 30, totalPages: 2 });
+
+    const p2 = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=capme&page=2`).set(authHeader(user.id, user.email));
+    expect(p2.body.data.tasks).toHaveLength(5);
+    expect(p2.body.meta).toMatchObject({ page: 2, total: 30 });
+    // No overlap between pages.
+    const ids = new Set([...res.body.data.tasks, ...p2.body.data.tasks].map((x: any) => x.id));
+    expect(ids.size).toBe(30);
+  });
+
+  it('a smaller perPage is honoured', async () => {
+    const { user, workspace, member, list } = await seedWorkspace();
+    for (let i = 0; i < 6; i++) await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, title: `few ${i}` });
+    const res = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=few&perPage=4`).set(authHeader(user.id, user.email));
+    expect(res.body.data.tasks).toHaveLength(4);
+    expect(res.body.meta).toEqual({ page: 1, perPage: 4, total: 6, totalPages: 2 });
+  });
+
+  it('blank / whitespace query returns empty results with zero totals', async () => {
+    const { user, workspace, member, list } = await seedWorkspace();
+    await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, title: 'anything' });
+    for (const q of ['', '%20%20']) {
+      const res = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=${q}`).set(authHeader(user.id, user.email));
+      expect(res.status).toBe(200);
+      expect(res.body.data).toEqual({ tasks: [], comments: [], totals: { tasks: 0, comments: 0 } });
+    }
+  });
+
+  it('a manager matches tasks (and comments) in lists their direct reports are on, but not unrelated lists', async () => {
+    const { workspace, member: admin } = await seedWorkspace();
+    const { user: mgrUser } = await createUser();
+    const mgr = await addMember(workspace.id, mgrUser.id, 'manager');
+    const { user: repUser } = await createUser();
+    const rep = await addMember(workspace.id, repUser.id, 'employee', mgr.id);
+    const { user: otherUser } = await createUser();
+    const other = await addMember(workspace.id, otherUser.id, 'employee'); // reports to nobody
+    const repList = await createList({ workspaceId: workspace.id, createdById: admin.id });
+    await addListMember(repList.id, rep.id);
+    const otherList = await createList({ workspaceId: workspace.id, createdById: admin.id });
+    await addListMember(otherList.id, other.id);
+    const mine = await createList({ workspaceId: workspace.id, createdById: admin.id });
+    await addListMember(mine.id, mgr.id);
+
+    const a = await createTask({ workspaceId: workspace.id, listId: repList.id, creatorId: admin.id, title: 'scopeword via report' });
+    const b = await createTask({ workspaceId: workspace.id, listId: otherList.id, creatorId: admin.id, title: 'scopeword hidden' });
+    const c = await createTask({ workspaceId: workspace.id, listId: mine.id, creatorId: admin.id, title: 'scopeword own list' });
+    await prisma().comment.create({ data: { taskId: a.id, authorId: rep.id, body: 'scopeword in a visible comment' } });
+    await prisma().comment.create({ data: { taskId: b.id, authorId: other.id, body: 'scopeword in a hidden comment' } });
+
+    const res = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=scopeword`).set(authHeader(mgrUser.id, mgrUser.email));
+    expect(res.body.data.tasks.map((t: any) => t.id).sort()).toEqual([a.id, c.id].sort());
+    expect(res.body.data.comments.map((x: any) => x.task.id)).toEqual([a.id]);
+    expect(res.body.data.totals).toEqual({ tasks: 2, comments: 1 });
+
+    // The same search as the unrelated employee sees only their list.
+    const emp = await request(srv()).get(`/api/v1/workspaces/${workspace.id}/search?q=scopeword`).set(authHeader(otherUser.id, otherUser.email));
+    expect(emp.body.data.tasks.map((t: any) => t.id)).toEqual([b.id]);
+    expect(emp.body.data.comments.map((x: any) => x.task.id)).toEqual([b.id]);
+  });
+
+  it('a list membership in another workspace never widens the scope', async () => {
+    const a = await seedWorkspace();
+    const b = await seedWorkspace();
+    const { user: empUser } = await createUser();
+    const empA = await addMember(a.workspace.id, empUser.id, 'employee');
+    const empB = await addMember(b.workspace.id, empUser.id, 'employee');
+    await addListMember(b.list.id, empB.id);
+    await createTask({ workspaceId: b.workspace.id, listId: b.list.id, creatorId: b.member.id, title: 'crossws item' });
+    // empA is on no list in workspace A → nothing, even though the term exists in B.
+    const res = await request(srv()).get(`/api/v1/workspaces/${a.workspace.id}/search?q=crossws`).set(authHeader(empUser.id, empUser.email));
+    expect(res.body.data.tasks).toEqual([]);
+    expect(res.body.data.totals.tasks).toBe(0);
+    expect(empA.id).toBeTruthy();
+  });
+
+  it('the trigram indexes from custom_indexes.sql are present on the test DB (global-setup re-applies them after db push)', async () => {
+    const rows = await prisma().$queryRaw<{ indexname: string }[]>`SELECT indexname FROM pg_indexes WHERE indexname IN ('idx_tasks_title_trgm','idx_tasks_description_trgm','idx_comments_body_trgm') ORDER BY indexname`;
+    expect(rows.map(r => r.indexname)).toEqual(['idx_comments_body_trgm', 'idx_tasks_description_trgm', 'idx_tasks_title_trgm']);
   });
 });

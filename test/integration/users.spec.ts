@@ -23,8 +23,27 @@ describe('Users — GET /users/me', () => {
       name: 'Profile Person',
       authProvider: 'email',
       createdAt: user.createdAt.toISOString(),
+      features: { ai: false },
     });
     expect(res.body.data).not.toHaveProperty('passwordHash');
+  });
+
+  // QA #38: the web decides whether to show the AI panel from this flag, which
+  // is derived from ANTHROPIC_API_KEY on the server (unset in the test env).
+  it('features.ai is false without ANTHROPIC_API_KEY and true with it', async () => {
+    const { user } = await createUser();
+    const off = await request(srv()).get('/api/v1/users/me').set(authHeader(user.id, user.email));
+    expect(off.body.data.features).toEqual({ ai: false });
+
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
+    const keyed = await bootstrapApp();
+    try {
+      const on = await request(keyed.getHttpServer()).get('/api/v1/users/me').set(authHeader(user.id, user.email));
+      expect(on.body.data.features).toEqual({ ai: true });
+    } finally {
+      delete process.env.ANTHROPIC_API_KEY;
+      await keyed.close();
+    }
   });
 
   it('reports authProvider=google for a Google account', async () => {

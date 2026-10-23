@@ -1,4 +1,4 @@
-import { Injectable, Module, Controller, Post, Body, Param, UseGuards } from '@nestjs/common';
+import { Injectable, Module, Controller, Post, Body, Param, UseGuards, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IsString, IsNotEmpty } from 'class-validator';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -6,6 +6,8 @@ import { CurrentMember } from '../../common/decorators';
 import { WorkspaceGuard } from '../../common/guards';
 import { successResponse } from '../../common/dto/response.dto';
 import { listScope } from '../../common/utils/list-access';
+
+export const AI_NOT_ENABLED_MESSAGE = "The AI assistant isn't enabled for this workspace yet.";
 
 export class AiChatDto { @IsString() @IsNotEmpty() message: string = ''; }
 export class AiParseDto { @IsString() @IsNotEmpty() input: string = ''; }
@@ -15,7 +17,9 @@ export class AiService {
   constructor(private prisma: PrismaService, private config: ConfigService) {}
   async chat(wid: string, member: any, message: string) {
     const key = this.config.get<string>('ai.anthropicApiKey');
-    if (!key) return { response: 'AI not configured. Set ANTHROPIC_API_KEY.' };
+    // Surfaced as a 400 so the web shows a real message instead of rendering a
+    // dev string as a chat reply; GET /users/me features.ai tells it up front.
+    if (!key) throw new BadRequestException(AI_NOT_ENABLED_MESSAGE);
     // The prompt context obeys the same visibility as GET /tasks: non-admins only
     // get tasks from lists they can open; archived and trashed tasks never go in.
     const tasks = await this.prisma.task.findMany({

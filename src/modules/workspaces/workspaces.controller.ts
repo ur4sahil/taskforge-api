@@ -4,7 +4,7 @@ import { WorkspacesService } from './workspaces.service';
 import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, UpdateOwnMemberDto } from './dto';
 import { CurrentMember, CurrentUser, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
-import { successResponse, PaginationDto } from '../../common/dto/response.dto';
+import { successResponse, WidePaginationDto } from '../../common/dto/response.dto';
 
 @Controller('workspaces')
 export class WorkspacesController {
@@ -33,9 +33,11 @@ export class WorkspacesController {
     return successResponse(await this.svc.update(wid, dto));
   }
 
+  // Directory listing: 200/page by default (max 500) so the web gets the whole
+  // roster for pickers in one call. meta.total says when there is more.
   @Get(':wid/members')
   @UseGuards(WorkspaceGuard)
-  async members(@Param('wid') wid: string, @Query() p: PaginationDto) {
+  async members(@Param('wid') wid: string, @Query() p: WidePaginationDto) {
     const r = await this.svc.getMembers(wid, p.page, p.perPage);
     return successResponse(r.members, r.meta);
   }

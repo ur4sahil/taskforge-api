@@ -19,14 +19,18 @@ beforeEach(async () => { await truncateAll(); });
 const srv = () => app.getHttpServer();
 
 describe('AI endpoints (no API key configured)', () => {
-  it('chat returns the not-configured fallback message', async () => {
+  // QA #38: a dev string used to come back as a 201 chat reply. Now a 400 with
+  // a user-facing message, so the web shows an error state instead of a "bot" line.
+  it('chat returns 400 with a user-facing message when no key is configured', async () => {
     const { user, workspace } = await seedWorkspace();
     const res = await request(srv())
       .post(`/api/v1/workspaces/${workspace.id}/ai/chat`)
       .set(authHeader(user.id, user.email))
       .send({ message: 'What should I work on?' });
-    expect(res.status).toBe(201);
-    expect(res.body.data.response).toMatch(/not configured/i);
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(res.body.error.message).toBe("The AI assistant isn't enabled for this workspace yet.");
+    expect(JSON.stringify(res.body)).not.toMatch(/ANTHROPIC_API_KEY/);
   });
 
   it('parse-task echoes the input with zero confidence', async () => {

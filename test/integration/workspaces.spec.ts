@@ -75,6 +75,49 @@ describe('Workspaces', () => {
     expect(res.body.meta).toMatchObject({ total: 3, page: 1, totalPages: 1 });
   });
 
+  // QA #10/#23/#50: the roster is a directory, not a feed — default to 200 a
+  // page so pickers get everyone in one call, and carry isActive + managerId.
+  describe('GET /workspaces/:wid/members paging + row shape', () => {
+    it('defaults to perPage 200 with meta.total, caps at 500, and still honours an explicit perPage', async () => {
+      const { user, workspace } = await seedWorkspace();
+      for (let i = 0; i < 30; i++) { const { user: u } = await createUser(); await addMember(workspace.id, u.id, 'employee'); }
+
+      const def = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/members`).set(authHeader(user.id, user.email));
+      expect(def.status).toBe(200);
+      expect(def.body.data).toHaveLength(31);
+      expect(def.body.meta).toEqual({ page: 1, perPage: 200, total: 31, totalPages: 1 });
+
+      const small = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/members?perPage=10&page=2`).set(authHeader(user.id, user.email));
+      expect(small.body.data).toHaveLength(10);
+      expect(small.body.meta).toEqual({ page: 2, perPage: 10, total: 31, totalPages: 4 });
+
+      await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/members?perPage=501`).set(authHeader(user.id, user.email)).expect(400);
+    });
+
+    it('rows include isActive and managerId (and the manager name)', async () => {
+      const { user, workspace, member: admin } = await seedWorkspace();
+      const { user: mgrUser } = await createUser({ name: 'Boss' });
+      const mgr = await addMember(workspace.id, mgrUser.id, 'manager');
+      const { user: repUser } = await createUser();
+      const rep = await addMember(workspace.id, repUser.id, 'employee', mgr.id);
+      await prisma().workspaceMember.update({ where: { id: rep.id }, data: { isActive: false } });
+
+      const res = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}/members`).set(authHeader(user.id, user.email));
+      const byId = Object.fromEntries(res.body.data.map((m: any) => [m.id, m]));
+      expect(byId[admin.id]).toMatchObject({ isActive: true, managerId: null, role: 'admin' });
+      expect(byId[rep.id]).toMatchObject({ isActive: false, managerId: mgr.id, role: 'employee' });
+      expect(byId[rep.id].manager.user.name).toBe('Boss');
+      expect(byId[rep.id].user).toMatchObject({ id: repUser.id, email: repUser.email });
+    });
+  });
+
+  it('GET /workspaces/:wid carries features.ai (false without ANTHROPIC_API_KEY)', async () => {
+    const { user, workspace } = await seedWorkspace();
+    const res = await request(app.getHttpServer()).get(`/api/v1/workspaces/${workspace.id}`).set(authHeader(user.id, user.email));
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ id: workspace.id, features: { ai: false } });
+  });
+
   describe('POST /workspaces/:wid/members/:mid/rotate-password', () => {
     it('admin can rotate; returns new temp password; old password no longer logs in', async () => {
       const { user: admin, workspace } = await seedWorkspace();

@@ -1,5 +1,8 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Module, Controller, Post, Get, Patch, Delete, Body, Param, Query, UseGuards, Req } from '@nestjs/common';
 import { Request } from 'express';
+import { Prisma } from '@prisma/client';
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
@@ -10,6 +13,11 @@ import { workspaceTimezone, todayKey, dateKeyToDb } from '../../common/utils/dat
 import { CreateTaskDto, UpdateTaskDto, TaskFilterDto, CreateChecklistItemDto, UpdateChecklistItemDto, ReorderChecklistDto, isFlagOn } from './dto';
 import { NotificationsModule, NotificationsService } from '../notifications/notifications.module';
 import { RemindersModule, RemindersService } from '../reminders/reminders.module';
+
+/** Activity feed pages at 50 (a task rarely has more history than that). */
+export class ActivityPaginationDto extends PaginationDto {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(500) perPage: number = 50;
+}
 
 const TASK_INCLUDE = {
   creator: { include: { user: { select: { id: true, name: true, avatarUrl: true } } } },
@@ -195,6 +203,37 @@ export class TasksService {
     return t;
   }
 
+  /** Merged, newest-first history of one task: audit rows (entityType task,
+   *  scoped to this workspace) plus its comments. The caller just needs to see
+   *  the task (findOne → 404 outside the workspace). One UNION ALL statement
+   *  with LIMIT/OFFSET so paging is correct across both sources, plus two
+   *  counts for meta — all in parallel. */
+  async activity(wid: string, tid: string, page: number, perPage: number) {
+    await this.findOne(wid, tid);
+    const [rows, audits, comments] = await Promise.all([
+      this.prisma.$queryRaw<{ at: Date; actorName: string | null; kind: 'audit' | 'comment'; action: string; changes: any; body: string | null }[]>(Prisma.sql`
+        SELECT * FROM (
+          SELECT a.created_at AS "at", u.name AS "actorName", 'audit'::text AS kind, a.action, a.changes, NULL::text AS body
+          FROM audit_logs a
+          LEFT JOIN workspace_members wm ON wm.id = a.actor_id
+          LEFT JOIN users u ON u.id = wm.user_id
+          WHERE a.workspace_id = ${wid}::uuid AND a.entity_type = 'task' AND a.entity_id = ${tid}
+          UNION ALL
+          SELECT c.created_at, u.name, 'comment'::text, 'comment.created', NULL::jsonb, c.body
+          FROM comments c
+          JOIN workspace_members wm ON wm.id = c.author_id
+          JOIN users u ON u.id = wm.user_id
+          WHERE c.task_id = ${tid}::uuid
+        ) x ORDER BY "at" DESC LIMIT ${perPage} OFFSET ${(page - 1) * perPage}`),
+      this.prisma.auditLog.count({ where: { workspaceId: wid, entityType: 'task', entityId: tid } }),
+      this.prisma.comment.count({ where: { taskId: tid } }),
+    ]);
+    const items = rows.map(r => r.kind === 'comment'
+      ? { at: r.at, actorName: r.actorName ?? 'Unknown', kind: 'comment' as const, action: r.action, summary: excerpt(r.body ?? '') }
+      : { at: r.at, actorName: r.actorName ?? 'System', kind: 'audit' as const, action: r.action, summary: summarizeAudit(r.action, r.changes), changes: r.changes ?? {} });
+    return { items, meta: paginationMeta(audits + comments, page, perPage) };
+  }
+
   async update(wid: string, tid: string, dto: UpdateTaskDto, member: any) {
     const task = await this.findOne(wid, tid);
     const perms = this.getPerms(member, task);
@@ -362,6 +401,29 @@ export class TasksService {
   }
 }
 
+function excerpt(body: string, max = 140): string {
+  const one = body.replace(/\s+/g, ' ').trim();
+  return one.length > max ? one.slice(0, max - 1) + '…' : one;
+}
+
+/** One human line per audit action. `changes` is whatever the controller
+ *  recorded (the PATCH body for task.updated), so we name the fields touched. */
+function summarizeAudit(action: string, changes: any): string {
+  const c = changes && typeof changes === 'object' ? changes : {};
+  switch (action) {
+    case 'task.created': return c.title ? `Created "${c.title}"` : 'Created';
+    case 'task.updated': {
+      const keys = Object.keys(c);
+      if (keys.length === 1 && keys[0] === 'status') return `Changed status to ${String(c.status).replace('_', ' ')}`;
+      if (keys.length === 1 && keys[0] === 'assigneeId') return c.assigneeId ? 'Reassigned' : 'Unassigned';
+      return keys.length ? `Updated ${keys.join(', ')}` : 'Updated';
+    }
+    case 'task.archived': return 'Archived';
+    case 'task.unarchived': return 'Unarchived';
+    default: return action;
+  }
+}
+
 @Controller('workspaces/:wid')
 @UseGuards(WorkspaceGuard)
 export class TasksController {
@@ -389,6 +451,12 @@ export class TasksController {
   @Get('tasks/:tid')
   async findOne(@Param('wid') w: string, @Param('tid') t: string) {
     return successResponse(await this.svc.findOne(w, t));
+  }
+
+  @Get('tasks/:tid/activity')
+  async activity(@Param('wid') w: string, @Param('tid') t: string, @Query() p: ActivityPaginationDto) {
+    const r = await this.svc.activity(w, t, p.page, p.perPage);
+    return successResponse(r.items, r.meta);
   }
 
   @Patch('tasks/:tid')

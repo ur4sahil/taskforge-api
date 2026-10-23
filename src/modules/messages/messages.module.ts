@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Module, Controller, Post, Get, Patch, Delete, Body, Param, Query, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { IsString, IsNotEmpty, MaxLength, IsOptional, IsArray, IsUUID, ArrayMinSize, ArrayMaxSize } from 'class-validator';
+import { IsString, IsNotEmpty, MaxLength, IsOptional, IsArray, IsUUID, ArrayMinSize, ArrayMaxSize, IsISO8601 } from 'class-validator';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember } from '../../common/decorators';
@@ -39,8 +39,10 @@ export class ForwardDto {
   @IsOptional() @IsString() @MaxLength(500) comment?: string;
 }
 export class MuteDto {
-  // ISO timestamp; pass an empty/missing value to unmute.
-  @IsOptional() @IsString() mutedUntil?: string | null;
+  // `until`: ISO timestamp to mute until (far future = indefinitely); null unmutes.
+  // `mutedUntil` is the legacy spelling the current web client sends — same meaning.
+  @IsOptional() @IsISO8601() until?: string | null;
+  @IsOptional() @IsISO8601() mutedUntil?: string | null;
 }
 export class SearchMessagesDto {
   @IsString() @IsNotEmpty() @MaxLength(200) q: string = '';
@@ -116,6 +118,7 @@ export class MessagesService {
           memberCount: c.members.length,
           lastMessageAt: c.lastMessageAt,
           createdAt: c.createdAt,
+          createdById: c.createdById,
           mutedUntil: m.mutedUntil,
           // For 1:1 the UI shows the "other" person; for groups it shows c.name and a stack of avatars.
           other: isGroup ? null : (others[0] || null),
@@ -154,6 +157,7 @@ export class MessagesService {
     const created = await this.prisma.conversation.create({
       data: {
         workspaceId: wid,
+        createdById: mid,
         members: { create: [{ workspaceMemberId: mid }, { workspaceMemberId: otherMid }] },
       },
     });
@@ -190,24 +194,24 @@ export class MessagesService {
       data: {
         workspaceId: wid,
         name,
+        createdById: mid,
         members: { create: ids.map(id => ({ workspaceMemberId: id })) },
       },
     });
     return this.hydrateConversation(created.id, mid);
   }
 
-  async renameConversation(wid: string, cid: string, mid: string, name: string) {
-    await this.assertParticipant(cid, mid);
-    const conv = await this.prisma.conversation.findUnique({ where: { id: cid } });
-    if (!conv) throw new NotFoundException('Conversation not found');
+  /** Rename a group: conversation creator or a workspace admin only (QA #48).
+   *  The caller must also be a participant. */
+  async renameConversation(wid: string, cid: string, member: { id: string; role: string }, name: string) {
+    const conv = await this.assertCanManage(wid, cid, member);
     if (!conv.name) throw new BadRequestException('1:1 conversations cannot be renamed');
     return this.prisma.conversation.update({ where: { id: cid }, data: { name: name.trim() } });
   }
 
-  async addMember(wid: string, cid: string, mid: string, newMemberId: string) {
-    await this.assertParticipant(cid, mid);
-    const conv = await this.prisma.conversation.findUnique({ where: { id: cid } });
-    if (!conv) throw new NotFoundException('Conversation not found');
+  /** Add to a group: creator or workspace admin only. */
+  async addMember(wid: string, cid: string, member: { id: string; role: string }, newMemberId: string) {
+    const conv = await this.assertCanManage(wid, cid, member);
     if (!conv.name) throw new BadRequestException('Cannot add members to a 1:1 conversation — create a group instead');
     const m = await this.prisma.workspaceMember.findFirst({ where: { id: newMemberId, workspaceId: wid, isActive: true } });
     if (!m) throw new NotFoundException('Member not found');
@@ -219,14 +223,34 @@ export class MessagesService {
     return { ok: true };
   }
 
-  async removeMember(wid: string, cid: string, mid: string, removeMid: string) {
-    await this.assertParticipant(cid, mid);
-    const conv = await this.prisma.conversation.findUnique({ where: { id: cid }, include: { _count: { select: { members: true } } } });
-    if (!conv) throw new NotFoundException('Conversation not found');
+  /** Remove from a group. Anyone may remove themself (leave); removing someone
+   *  else needs creator or workspace admin. */
+  async removeMember(wid: string, cid: string, member: { id: string; role: string }, removeMid: string) {
+    const isSelf = removeMid === member.id;
+    const conv = isSelf ? await this.loadConversation(wid, cid, member.id) : await this.assertCanManage(wid, cid, member);
     if (!conv.name) throw new BadRequestException('Cannot leave or kick from a 1:1');
-    if (conv._count.members <= 2 && removeMid !== mid) throw new BadRequestException('Group must have at least 2 members');
+    if (conv._count.members <= 2 && !isSelf) throw new BadRequestException('Group must have at least 2 members');
     await this.prisma.conversationMember.deleteMany({ where: { conversationId: cid, workspaceMemberId: removeMid } });
     return { ok: true };
+  }
+
+  /** Participant check + load, scoped to the workspace (404 for a foreign id). */
+  private async loadConversation(wid: string, cid: string, mid: string) {
+    await this.assertParticipant(cid, mid);
+    const conv = await this.prisma.conversation.findFirst({ where: { id: cid, workspaceId: wid }, include: { _count: { select: { members: true } } } });
+    if (!conv) throw new NotFoundException('Conversation not found');
+    return conv;
+  }
+
+  /** Group management gate: participant AND (creator OR workspace admin).
+   *  Groups created before createdById existed have no creator, so only an
+   *  admin can manage them. */
+  private async assertCanManage(wid: string, cid: string, member: { id: string; role: string }) {
+    const conv = await this.loadConversation(wid, cid, member.id);
+    if (member.role !== 'admin' && conv.createdById !== member.id) {
+      throw new ForbiddenException('Only the group creator or a workspace admin can do that');
+    }
+    return conv;
   }
 
   private async hydrateConversation(cid: string, mid: string) {
@@ -248,6 +272,7 @@ export class MessagesService {
       memberCount: c.members.length,
       lastMessageAt: c.lastMessageAt,
       createdAt: c.createdAt,
+      createdById: c.createdById,
       other: isGroup ? null : (others[0] || null),
       members: c.members.map(m => m.workspaceMember),
       lastMessage: c.messages[0] || null,
@@ -601,15 +626,15 @@ export class MessagesController {
   }
 
   @Patch(':cid') async rename(@Param('wid') w: string, @Param('cid') c: string, @Body() dto: RenameConversationDto, @CurrentMember() m: any) {
-    return successResponse(await this.svc.renameConversation(w, c, m.id, dto.name));
+    return successResponse(await this.svc.renameConversation(w, c, m, dto.name));
   }
 
   @Post(':cid/members') async addMember(@Param('wid') w: string, @Param('cid') c: string, @Body() dto: AddMemberDto, @CurrentMember() m: any) {
-    return successResponse(await this.svc.addMember(w, c, m.id, dto.workspaceMemberId));
+    return successResponse(await this.svc.addMember(w, c, m, dto.workspaceMemberId));
   }
 
   @Delete(':cid/members/:mid') async removeMember(@Param('wid') w: string, @Param('cid') c: string, @Param('mid') rm: string, @CurrentMember() m: any) {
-    return successResponse(await this.svc.removeMember(w, c, m.id, rm));
+    return successResponse(await this.svc.removeMember(w, c, m, rm));
   }
 
   @Get(':cid/messages') async messages(@Param('wid') w: string, @Param('cid') c: string, @CurrentMember() m: any, @Query() p: PaginationDto) {
@@ -652,9 +677,11 @@ export class MessagesController {
     return successResponse(await this.svc.listPinnedMessages(w, c, m.id));
   }
 
+  /** Body { until: ISO | null } (null = unmute); `mutedUntil` accepted as an alias.
+   *  Returns { mutedUntil }, which also appears on every GET /conversations row. */
   @Post(':cid/mute')
   async mute(@Param('wid') w: string, @Param('cid') c: string, @Body() dto: MuteDto, @CurrentMember() m: any) {
-    return successResponse(await this.svc.setMuted(w, c, m.id, dto.mutedUntil));
+    return successResponse(await this.svc.setMuted(w, c, m.id, dto.until !== undefined ? dto.until : dto.mutedUntil));
   }
 
   @Get(':cid/search')

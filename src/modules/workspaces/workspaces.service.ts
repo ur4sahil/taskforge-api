@@ -1,15 +1,18 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { generateSlug } from '../../common/utils/slug';
 import { paginationMeta } from '../../common/dto/response.dto';
+import { featureFlags } from '../../common/utils/features';
 import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto } from './dto';
 
 @Injectable()
 export class WorkspacesService {
   constructor(
     private prisma: PrismaService,
+    private config: ConfigService,
   ) {}
 
   async create(dto: CreateWorkspaceDto, userId: string) {
@@ -35,7 +38,7 @@ export class WorkspacesService {
   async findOne(wid: string) {
     const w = await this.prisma.workspace.findUnique({ where: { id: wid } });
     if (!w) throw new NotFoundException('Not found');
-    return w;
+    return { ...w, features: featureFlags(this.config) };
   }
 
   async update(wid: string, dto: UpdateWorkspaceDto) {
@@ -53,6 +56,9 @@ export class WorkspacesService {
           user: { select: { id: true, email: true, name: true, avatarUrl: true } },
           manager: { include: { user: { select: { name: true } } } },
         },
+        // Stable order so pages never overlap. Rows carry every scalar column,
+        // including isActive and managerId, which the web's roster depends on.
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         skip: (page - 1) * perPage,
         take: perPage,
       }),
