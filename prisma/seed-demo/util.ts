@@ -262,7 +262,7 @@ export function chunk<T>(arr: T[], size: number): T[][] {
 
 /** Fill `{slot}` placeholders from a map. Unknown slots are left as-is. */
 export function fill(template: string, slots: Record<string, string>): string {
-  return template.replace(/\{(\w+)\}/g, (m, k) => (k in slots ? slots[k] : m));
+  return template.replace(/\{([\w:]+)\}/g, (m, k) => (k in slots ? slots[k] : m));
 }
 
 export function truncate(s: string, n = 140): string { return s.length > n ? s.slice(0, n - 3) + '…' : s; }

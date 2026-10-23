@@ -950,7 +950,7 @@ class Builder {
       title, description: null, priority, status: 'todo', defaultAssigneeMemberId: assignee?.id ?? null, dueDateOffsetDays: dueOff, startDateOffsetDays: null,
       checklistItems: items.map((text, i) => ({ text, sortOrder: i })),
     });
-    const turnoverV3 = taskTpl('Turnover — {unit}', 'high', 10, ['Move-out inspection', 'Re-key', 'Paint', 'Deep clean', 'Carpet clean', 'Photos', 'Punch list walk', 'List unit'], kevin);
+    const turnoverV3 = taskTpl('Turnover — unit', 'high', 10, ['Move-out inspection', 'Re-key', 'Paint', 'Deep clean', 'Carpet clean', 'Photos', 'Punch list walk', 'List unit'], kevin);
     const turnoverV2 = { ...turnoverV3, checklistItems: turnoverV3.checklistItems.slice(0, 6) };
     const turnoverV1 = { ...turnoverV3, dueDateOffsetDays: 14, checklistItems: turnoverV3.checklistItems.slice(0, 4) };
     const t0 = U.at('2024-06-10', '10:00');
@@ -961,8 +961,8 @@ class Builder {
         { version: 2, data: turnoverV2, updatedAt: U.at('2025-01-14', '09:40') },
         { version: 1, data: turnoverV1, updatedAt: t0 },
       ] });
-    push({ type: 'task', name: 'Move-in inspection', createdById: jordan.id, visibility: 'workspace', data: taskTpl('Move-in walkthrough — {unit}', 'medium', 0, ['Condition report', 'Photos uploaded', 'Keys & fobs', 'Welcome packet', 'Utilities transferred'], jordan), createdAt: U.at('2024-09-03', '14:00'), updatedAt: U.at('2024-09-03', '14:00') });
-    push({ type: 'task', name: 'Vendor invoice approval', createdById: priya.id, visibility: 'personal', data: taskTpl('Pay invoice — {vendor}', 'medium', 25, ['Match PO', 'Code to property', 'Approve', 'Schedule payment']), createdAt: U.at('2025-02-11', '10:30'), updatedAt: U.at('2025-02-11', '10:30') });
+    push({ type: 'task', name: 'Move-in inspection', createdById: jordan.id, visibility: 'workspace', data: taskTpl('Move-in walkthrough — unit', 'medium', 0, ['Condition report', 'Photos uploaded', 'Keys & fobs', 'Welcome packet', 'Utilities transferred'], jordan), createdAt: U.at('2024-09-03', '14:00'), updatedAt: U.at('2024-09-03', '14:00') });
+    push({ type: 'task', name: 'Vendor invoice approval', createdById: priya.id, visibility: 'personal', data: taskTpl('Pay invoice — vendor', 'medium', 25, ['Match PO', 'Code to property', 'Approve', 'Schedule payment']), createdAt: U.at('2025-02-11', '10:30'), updatedAt: U.at('2025-02-11', '10:30') });
     push({ type: 'list', name: 'New property onboarding', description: 'Everything to do in the first 30 days after closing.', createdById: elena.id, visibility: 'workspace', createdAt: U.at('2025-04-22', '09:00'), updatedAt: U.at('2025-04-22', '09:00'),
       data: { listName: 'Onboarding — {property}', listDescription: 'First 30 days after closing.', defaultAssigneeMemberId: kevin.id, tasks: [
         taskTpl('Register rental license', 'high', 10, ['Gather documents', 'Submit application', 'Pay fee'], kevin), taskTpl('Set up utilities in company name', 'high', 3, ['Electric', 'Water', 'Gas', 'Trash'], kevin),
