@@ -111,7 +111,7 @@ export class ReportsService {
   async team(wid: string, managerId: string) {
     const bounds = await this.dayBounds(wid);
     const reports = await this.prisma.workspaceMember.findMany({ where: { workspaceId: wid, managerId, isActive: true }, include: { user: { select: { name: true } } } });
-    const stats = await Promise.all(reports.map(async (r: any) => ({ name: r.user.name, ...await this.personal(wid, r.id, bounds) })));
+    const stats = await Promise.all(reports.map(async (r: any) => ({ memberId: r.id, name: r.user.name, ...await this.personal(wid, r.id, bounds) })));
     return { teamSize: reports.length, members: stats, caveat: 'Task counts do not reflect quality or complexity of work.' };
   }
   async workspace(wid: string) {
