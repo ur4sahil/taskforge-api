@@ -31,21 +31,7 @@ import { EmailModule } from './common/email/email.module';
 import { InvitationsModule } from './modules/invitations/invitations.module';
 import { JwtAuthGuard, UserAwareThrottlerGuard } from './common/guards';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
-
-function shouldSkipThrottle(ctx: any): boolean {
-  if (process.env.NODE_ENV === 'test') return true;
-  const secret = process.env.THROTTLE_BYPASS_SECRET;
-  if (!secret) return false;
-  // ThrottlerGuard passes its ExecutionContext; for the HTTP path, switchToHttp()
-  // exposes the request whose headers carry the bypass token.
-  try {
-    const req = ctx?.switchToHttp?.()?.getRequest?.();
-    const header = req?.headers?.['x-bypass-throttle'];
-    return typeof header === 'string' && header === secret;
-  } catch {
-    return false;
-  }
-}
+import { THROTTLERS } from './common/throttle.config';
 
 @Module({
   imports: [
@@ -67,10 +53,10 @@ function shouldSkipThrottle(ctx: any): boolean {
     //      against live prod) skip throttling without weakening real-world
     //      brute-force protection. The secret is set on the VPS .env and
     //      mirrored in Playwright's env at run time.
-    ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 600, skipIf: shouldSkipThrottle },
-      { name: 'auth', ttl: 60_000, limit: 5, skipIf: shouldSkipThrottle },
-    ]),
+    // Exactly one throttler: every entry in this array is enforced on every
+    // route, so a second 5/min "auth" entry here was rate-limiting all traffic.
+    // Credential routes tighten the default bucket with @Throttle(AUTH_THROTTLE).
+    ThrottlerModule.forRoot(THROTTLERS),
     BullModule.forRootAsync({
       useFactory: () => {
         const url = new URL(process.env.REDIS_URL || 'redis://localhost:6379');

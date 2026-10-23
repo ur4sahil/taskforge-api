@@ -1,5 +1,4 @@
 import { Controller, Post, Get, Patch, Body, Param, Query, Req, UseGuards } from '@nestjs/common';
-import { SkipThrottle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { WorkspacesService } from './workspaces.service';
 import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto } from './dto';
@@ -8,11 +7,6 @@ import { WorkspaceGuard, RolesGuard } from '../../common/guards';
 import { successResponse, PaginationDto } from '../../common/dto/response.dto';
 
 @Controller('workspaces')
-// Member mutations (invite/role/deactivate/reactivate) are admin-only and
-// JWT-gated. The global 100/min default throttler was honest-user-bursting
-// (e.g. an admin onboarding a team). Bypass it here — the role guard is the
-// real protection.
-@SkipThrottle()
 export class WorkspacesController {
   constructor(private svc: WorkspacesService) {}
 

@@ -7,10 +7,10 @@ import { AuthService } from './auth.service';
 import { SignupDto, LoginDto, RefreshTokenDto } from './dto';
 import { Public } from '../../common/decorators';
 import { successResponse } from '../../common/dto/response.dto';
+import { AUTH_THROTTLE } from '../../common/throttle.config';
 
-// Tight rate-limit on credential endpoints — 5/min/ip. The global default is
-// 100/min; without this, brute-forcing a password would get 100 attempts/min/ip.
-const AUTH_RATE = { auth: { limit: 5, ttl: 60_000 } };
+// 5/min/ip on credential endpoints — overrides the 600/min default bucket.
+const AUTH_RATE = AUTH_THROTTLE;
 
 @Controller('auth')
 export class AuthController {

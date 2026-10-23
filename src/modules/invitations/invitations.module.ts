@@ -5,7 +5,8 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
-import { SkipThrottle, Throttle } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
+import { AUTH_THROTTLE } from '../../common/throttle.config';
 import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'crypto';
@@ -301,7 +302,6 @@ function hashToken(t: string): string {
 @Controller('workspaces/:wid/invitations')
 @UseGuards(WorkspaceGuard, RolesGuard)
 @Roles('admin')
-@SkipThrottle()
 export class WorkspaceInvitationsController {
   constructor(private svc: InvitationsService) {}
 
@@ -360,7 +360,7 @@ export class PublicInvitationsController {
 
   // Tighter throttle on accept to slow brute-force token guessing.
   @Public()
-  @Throttle({ auth: { limit: 5, ttl: 60_000 } })
+  @Throttle(AUTH_THROTTLE)
   @Post('accept/:token')
   async accept(@Param('token') token: string, @Body() dto: AcceptInvitationDto, @Req() req: Request) {
     const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip;
