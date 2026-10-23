@@ -161,20 +161,82 @@ describe('Auth', () => {
     expect(r.status).toBe(401);
   });
 
-  it('refresh with revoked/used token returns 401 (rotation)', async () => {
+  // ── Rotation + grace ──────────────────────────────────────────────────────
+  // A spent refresh token is accepted once more for REFRESH_REUSE_GRACE_MS, and
+  // only while the token issued in its place has never been used (the client
+  // never got the response). Everything else about rotation stays strict.
+  const refresh = (refreshToken: string) => request(srv()).post('/api/v1/auth/refresh').send({ refreshToken });
+  async function loginTokens() {
     const { user, password } = await createUser();
-    const login = await request(app.getHttpServer())
-      .post('/api/v1/auth/login').send({ email: user.email, password });
-    const { refreshToken } = login.body.data;
+    const body = (await login(user.email, password)).body.data;
+    return { user, password, ...body };
+  }
 
-    const first = await request(app.getHttpServer())
-      .post('/api/v1/auth/refresh').send({ refreshToken });
+  it('a lost refresh response is recoverable: the spent token works again within the grace window', async () => {
+    const { refreshToken: a } = await loginTokens();
+    const first = await refresh(a);
     expect(first.status).toBe(200);
+    const b = first.body.data.refreshToken;
 
-    // Reuse the original refresh token — should now be revoked.
-    const second = await request(app.getHttpServer())
-      .post('/api/v1/auth/refresh').send({ refreshToken });
-    expect(second.status).toBe(401);
+    // The client never saw B and retries with A.
+    const retry = await refresh(a);
+    expect(retry.status).toBe(200);
+    const c = retry.body.data.refreshToken;
+    expect(c).not.toBe(b);
+
+    // B was never delivered, so it is revoked; C is the live token.
+    expect((await refresh(b)).status).toBe(401);
+    expect((await refresh(c)).status).toBe(200);
+  });
+
+  it('a spent token is rejected once its successor has been used', async () => {
+    const { refreshToken: a } = await loginTokens();
+    const b = (await refresh(a)).body.data.refreshToken;
+    expect((await refresh(b)).status).toBe(200);
+    expect((await refresh(a)).status).toBe(401);
+  });
+
+  it('a spent token is rejected after the grace window', async () => {
+    const { refreshToken: a } = await loginTokens();
+    expect((await refresh(a)).status).toBe(200);
+    await prisma().refreshToken.updateMany({ where: { tokenHash: sha256(a) }, data: { rotatedAt: new Date(Date.now() - 61_000) } });
+    expect((await refresh(a)).status).toBe(401);
+  });
+
+  it('logging out the successor also closes the grace path', async () => {
+    const { refreshToken: a } = await loginTokens();
+    const r = (await refresh(a)).body.data;
+    const out = await request(srv()).post('/api/v1/auth/logout').set('Authorization', `Bearer ${r.accessToken}`).send({ refreshToken: r.refreshToken });
+    expect(out.status).toBe(200);
+    expect((await refresh(a)).status).toBe(401);
+  });
+
+  it('a password change closes the grace path for tokens spent just before it', async () => {
+    const { refreshToken: a, password, user } = await loginTokens();
+    const r = (await refresh(a)).body.data;
+    const ch = await request(srv()).post('/api/v1/auth/change-password').set('Authorization', `Bearer ${r.accessToken}`)
+      .send({ currentPassword: password, newPassword: 'Another-Passw0rd!' });
+    expect(ch.status).toBe(200);
+    expect((await refresh(a)).status).toBe(401);
+    // Only the pair change-password returned is live.
+    const live = await prisma().refreshToken.count({ where: { userId: user.id, isRevoked: false } });
+    expect(live).toBe(1);
+  });
+
+  it('two concurrent refreshes with the same token both succeed and leave one live token', async () => {
+    const { refreshToken: a, user } = await loginTokens();
+    const [x, y] = await Promise.all([refresh(a), refresh(a)]);
+    expect([x.status, y.status]).toEqual([200, 200]);
+    const live = await prisma().refreshToken.findMany({ where: { userId: user.id, isRevoked: false } });
+    expect(live).toHaveLength(1);
+    const winner = [x, y].find(r => sha256(r.body.data.refreshToken) === live[0].tokenHash);
+    expect(winner).toBeDefined();
+  });
+
+  it('a logged-out token never gets the grace path', async () => {
+    const { refreshToken: a, accessToken } = await loginTokens();
+    await request(srv()).post('/api/v1/auth/logout').set('Authorization', `Bearer ${accessToken}`).send({ refreshToken: a });
+    expect((await refresh(a)).status).toBe(401);
   });
 
   it('logout invalidates the refresh token; subsequent refresh fails', async () => {

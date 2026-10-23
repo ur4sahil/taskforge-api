@@ -8,10 +8,12 @@ import * as bcrypt from 'bcrypt';
 function makeService(prismaOverrides: any = {}, jwtOverrides: any = {}) {
   const prisma: any = {
     user: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-    refreshToken: { findFirst: jest.fn(), update: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
+    refreshToken: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
     workspaceMember: { findMany: jest.fn().mockResolvedValue([]) },
     ...prismaOverrides,
   };
+  // Interactive transactions run against the same mocks.
+  prisma.$transaction = jest.fn().mockImplementation((fn: any) => fn(prisma));
   const jwt: any = {
     sign: jest.fn().mockReturnValue('signed-access-token'),
     ...jwtOverrides,
@@ -134,17 +136,28 @@ describe('AuthService', () => {
       expect(prisma.refreshToken.create).not.toHaveBeenCalled();
     });
 
-    it('revokes the old refresh token before issuing new ones', async () => {
+    it('spends the old token (conditionally) and issues its successor with the recorded id', async () => {
       const { service, prisma } = makeService();
       prisma.refreshToken.findFirst.mockResolvedValue({
-        id: 'rt1', expiresAt: new Date(Date.now() + 60_000), userId: 'u1', user: { email: 'a@b.com', isActive: true },
+        id: 'rt1', isRevoked: false, expiresAt: new Date(Date.now() + 60_000), userId: 'u1', user: { email: 'a@b.com', isActive: true },
       });
+      prisma.refreshToken.updateMany.mockResolvedValue({ count: 1 });
       prisma.refreshToken.create.mockResolvedValue({});
       await service.refresh({ refreshToken: 'valid' } as any);
-      expect(prisma.refreshToken.update).toHaveBeenCalledWith({
-        where: { id: 'rt1' }, data: { isRevoked: true },
+      const claim = prisma.refreshToken.updateMany.mock.calls[0][0];
+      expect(claim.where).toEqual({ id: 'rt1', isRevoked: false });
+      expect(claim.data).toMatchObject({ isRevoked: true, rotatedAt: expect.any(Date), replacedById: expect.any(String) });
+      expect(prisma.refreshToken.create.mock.calls[0][0].data.id).toBe(claim.data.replacedById);
+    });
+
+    it('rejects a token revoked by logout (no rotatedAt) without issuing anything', async () => {
+      const { service, prisma } = makeService();
+      prisma.refreshToken.findFirst.mockResolvedValue({
+        id: 'rt1', isRevoked: true, expiresAt: new Date(Date.now() + 60_000), userId: 'u1', user: { email: 'a@b.com', isActive: true },
       });
-      expect(prisma.refreshToken.create).toHaveBeenCalled();
+      prisma.refreshToken.findUnique.mockResolvedValue({ id: 'rt1', isRevoked: true, rotatedAt: null, replacedById: null });
+      await expect(service.refresh({ refreshToken: 'used' } as any)).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
     });
   });
 

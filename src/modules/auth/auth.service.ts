@@ -4,7 +4,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EmailService } from '../../common/email/email.module';
 import { SignupDto, LoginDto, RefreshTokenDto, ChangePasswordDto } from './dto';
@@ -13,6 +13,12 @@ import { signupEnabled } from '../../config';
 /** Forgot-password links live this long. Short on purpose: the raw token is
  *  sitting in an inbox. */
 export const PASSWORD_RESET_EXPIRY_MINUTES = 60;
+
+/** A refresh token spent on /auth/refresh is accepted once more for this long,
+ *  as long as the token issued in its place has never been used. Covers the
+ *  response that never arrived: the page navigated, iOS suspended the PWA, or
+ *  the network dropped mid-request. Without it that session is unrecoverable. */
+export const REFRESH_REUSE_GRACE_MS = 60_000;
 
 /** Revoked / expired refresh tokens older than this are pruned opportunistically. */
 const REFRESH_TOKEN_PRUNE_AGE_MS = 30 * 86400000;
@@ -67,15 +73,55 @@ export class AuthService {
   async refresh(dto: RefreshTokenDto, ip?: string, ua?: string) {
     const hash = this.hashToken(dto.refreshToken);
     const stored = await this.prisma.refreshToken.findFirst({
-      where: { tokenHash: hash, isRevoked: false },
+      where: { tokenHash: hash },
       include: { user: true },
     });
     if (!stored || stored.expiresAt < new Date()) throw new UnauthorizedException('Invalid refresh token');
     // A deactivated user keeps a valid-looking refresh token until it expires;
     // without this check they could mint access tokens for 7 more days.
     if (!stored.user.isActive) throw new UnauthorizedException('Account deactivated');
-    await this.prisma.refreshToken.update({ where: { id: stored.id }, data: { isRevoked: true } });
-    return this.generateTokens(stored.userId, stored.user.email, ip, ua);
+
+    if (!stored.isRevoked) {
+      // Spend the token and record its successor in one transaction. The
+      // conditional update takes the row lock, so a concurrent refresh with the
+      // same token waits, finds it spent, and goes down the grace path below
+      // with the successor already committed.
+      const nextId = randomUUID();
+      const spent = await this.prisma.$transaction(async tx => {
+        const claim = await tx.refreshToken.updateMany({
+          where: { id: stored.id, isRevoked: false },
+          data: { isRevoked: true, rotatedAt: new Date(), replacedById: nextId },
+        });
+        if (claim.count !== 1) return null;
+        return this.generateTokens(stored.userId, stored.user.email, ip, ua, tx, nextId);
+      });
+      if (spent) return spent;
+    }
+    return this.reissueWithinGrace(stored.id, stored.userId, stored.user.email, ip, ua);
+  }
+
+  /** The token was already spent. Accept it once more only if it was spent by a
+   *  refresh under REFRESH_REUSE_GRACE_MS ago and its successor was never used
+   *  (so the client never received it). Logout and password changes revoke
+   *  without `rotatedAt`, and revoke the successor too, so neither passes. The
+   *  unused successor is revoked so only the newly issued token stays live. */
+  private async reissueWithinGrace(id: string, userId: string, email: string, ip?: string, ua?: string) {
+    const nextId = randomUUID();
+    const out = await this.prisma.$transaction(async tx => {
+      const spent = await tx.refreshToken.findUnique({ where: { id } });
+      if (!spent?.rotatedAt || !spent.replacedById) return null;
+      if (Date.now() - spent.rotatedAt.getTime() > REFRESH_REUSE_GRACE_MS) return null;
+      const dropped = await tx.refreshToken.updateMany({
+        where: { id: spent.replacedById, isRevoked: false },
+        data: { isRevoked: true },
+      });
+      if (dropped.count !== 1) return null;
+      await tx.refreshToken.update({ where: { id }, data: { replacedById: nextId } });
+      return this.generateTokens(userId, email, ip, ua, tx, nextId);
+    });
+    if (!out) throw new UnauthorizedException('Invalid refresh token');
+    this.log.log(`refresh token re-issued within grace for user ${userId}`);
+    return out;
   }
 
   async loginWithGoogle(profile: { email: string; name: string; avatarUrl: string | null }, ip?: string, ua?: string) {
@@ -236,14 +282,15 @@ export class AuthService {
     };
   }
 
-  private async generateTokens(userId: string, email: string, ip?: string, ua?: string) {
+  private async generateTokens(userId: string, email: string, ip?: string, ua?: string, db: Pick<PrismaService, 'refreshToken'> = this.prisma, id?: string) {
     const accessToken = this.jwt.sign(
       { sub: userId, email },
       { secret: this.config.get('auth.jwtAccessSecret'), expiresIn: this.config.get('auth.jwtAccessExpiry') || '15m' },
     );
     const refreshToken = randomBytes(40).toString('hex');
-    await this.prisma.refreshToken.create({
+    await db.refreshToken.create({
       data: {
+        ...(id ? { id } : {}),
         userId,
         tokenHash: this.hashToken(refreshToken),
         expiresAt: new Date(Date.now() + 7 * 86400000),

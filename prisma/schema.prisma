@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["relationJoins"]
 }
 
 datasource db {
@@ -38,6 +39,11 @@ model RefreshToken {
   tokenHash String   @map("token_hash") @db.VarChar(255)
   expiresAt DateTime @map("expires_at")
   isRevoked Boolean  @default(false) @map("is_revoked")
+  // Set when this token was spent on /auth/refresh (not by logout or a
+  // password change), with the id of the token issued in its place. Lets a
+  // client whose refresh response was lost retry briefly — see AuthService.refresh.
+  rotatedAt    DateTime? @map("rotated_at")
+  replacedById String?   @map("replaced_by_id") @db.Uuid
   userAgent String?  @map("user_agent") @db.VarChar(500)
   ipAddress String?  @map("ip_address") @db.VarChar(45)
   createdAt DateTime @default(now()) @map("created_at")

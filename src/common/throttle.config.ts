@@ -47,8 +47,15 @@ export const THROTTLERS: ThrottlerModuleOptions = [
   { name: 'default', ttl: DEFAULT_THROTTLE_TTL, limit: DEFAULT_THROTTLE_LIMIT, skipIf: shouldSkipThrottle },
 ];
 
-// Tight rate-limit for credential endpoints (signup / login / refresh /
+// Tight rate-limit for credential endpoints (signup / login / forgot-password /
 // invitation accept) — 5/min/ip. These are @Public, so the guard keys them by
 // IP; without this, brute-forcing a password or invite token would get 600
 // attempts/min. Use as `@Throttle(AUTH_THROTTLE)` on the handler.
 export const AUTH_THROTTLE = { default: { limit: 5, ttl: 60_000 } };
+
+// /auth/refresh gets its own, looser override. Every open tab and device
+// refreshes every 15 minutes, and staff in one office share one IP — at 5/min
+// a handful of people refreshing together 429'd each other, and a client whose
+// refresh was refused logged the user out. The token being presented is 80
+// random hex chars, so a higher limit buys an attacker nothing.
+export const REFRESH_THROTTLE = { default: { limit: 30, ttl: 60_000 } };

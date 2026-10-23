@@ -7,7 +7,7 @@ import { AuthService } from './auth.service';
 import { SignupDto, LoginDto, RefreshTokenDto, ForgotPasswordDto, ResetPasswordDto, ChangePasswordDto } from './dto';
 import { CurrentUser, Public } from '../../common/decorators';
 import { successResponse } from '../../common/dto/response.dto';
-import { AUTH_THROTTLE } from '../../common/throttle.config';
+import { AUTH_THROTTLE, REFRESH_THROTTLE } from '../../common/throttle.config';
 
 // 5/min/ip on credential endpoints — overrides the 600/min default bucket.
 const AUTH_RATE = AUTH_THROTTLE;
@@ -32,7 +32,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle(AUTH_RATE)
+  @Throttle(REFRESH_THROTTLE)
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   async refresh(@Body() dto: RefreshTokenDto, @Req() req: Request) {
