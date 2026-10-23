@@ -13,6 +13,15 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix('api/v1');
+  // The only legitimate caller is the cloudflared tunnel on this same host, which
+  // sits one hop in front of us. Trusting exactly that hop makes req.ip the real
+  // client address (Cloudflare appends it to X-Forwarded-For; a spoofed header
+  // from the client is left of it and ignored). Audit rows and the per-IP auth
+  // throttle both depend on this.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  // Run PrismaService.onModuleDestroy / BullMQ worker draining on SIGINT/SIGTERM
+  // (pm2 restart), instead of killing jobs mid-flight.
+  app.enableShutdownHooks();
   app.use(helmet());
   app.enableCors({
     origin: process.env.APP_URL || 'http://localhost:3000',
@@ -33,7 +42,12 @@ async function bootstrap() {
     SwaggerModule.setup('api/docs', app, SwaggerModule.createDocument(app, config));
   }
   const port = parseInt(process.env.PORT || '3001', 10);
-  await app.listen(port);
-  Logger.log(`TaskForge API on http://localhost:${port}`, 'Bootstrap');
+  // Loopback only. Public traffic reaches us through the cloudflared tunnel on
+  // localhost; binding 0.0.0.0 exposed plain-HTTP :3001 to the internet,
+  // bypassing Cloudflare TLS/WAF and the auth throttle. HOST exists for Docker
+  // or a dev box that needs LAN access.
+  const host = process.env.HOST || '127.0.0.1';
+  await app.listen(port, host);
+  Logger.log(`TaskForge API on http://${host}:${port}`, 'Bootstrap');
 }
 bootstrap();

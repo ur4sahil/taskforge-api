@@ -1,5 +1,14 @@
 import { registerAs } from '@nestjs/config';
 
+// Self-service account creation. This is an internal company tool: employees
+// join through an admin's invitation (which creates their account), so public
+// signup stays off in production unless explicitly enabled. Dev/test keep it on.
+// Read at call time, not boot, so tests can flip it.
+export function signupEnabled(): boolean {
+  if (process.env.SIGNUP_ENABLED !== undefined) return process.env.SIGNUP_ENABLED === 'true';
+  return process.env.NODE_ENV !== 'production';
+}
+
 export const appConfig = registerAs('app', () => ({
   nodeEnv: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT || '3001', 10),

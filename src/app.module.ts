@@ -32,30 +32,15 @@ import { InvitationsModule } from './modules/invitations/invitations.module';
 import { JwtAuthGuard, UserAwareThrottlerGuard } from './common/guards';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 import { THROTTLERS } from './common/throttle.config';
+import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig, emailConfig] }),
-    // Two throttler buckets: the global `default` and a tight `auth` bucket
-    // (5/min) for login + signup, applied per-route via @Throttle below.
-    //
-    // The default bucket is high (600/min) because each user gets their own
-    // bucket via UserAwareThrottlerGuard (per-userId for authenticated routes,
-    // per-IP otherwise). An iOS PWA actively navigating + WebSocket fallback +
-    // periodic background fetches comfortably bursts 60-80 req/min for a single
-    // user, and the previous 100/min limit produced 429s on normal use.
-    //
-    // Skip conditions:
-    //   1. NODE_ENV=test — keeps the in-memory tracker from carrying state
-    //      across the API's own jest suite (auth.spec.ts hits /signup 9x).
-    //   2. `x-bypass-throttle` request header matching env.THROTTLE_BYPASS_SECRET
-    //      — lets the E2E suite (which legitimately creates many ephemeral users
-    //      against live prod) skip throttling without weakening real-world
-    //      brute-force protection. The secret is set on the VPS .env and
-    //      mirrored in Playwright's env at run time.
     // Exactly one throttler: every entry in this array is enforced on every
     // route, so a second 5/min "auth" entry here was rate-limiting all traffic.
     // Credential routes tighten the default bucket with @Throttle(AUTH_THROTTLE).
+    // Limits, skip conditions and rationale live in common/throttle.config.ts.
     ThrottlerModule.forRoot(THROTTLERS),
     BullModule.forRootAsync({
       useFactory: () => {
@@ -76,7 +61,7 @@ import { THROTTLERS } from './common/throttle.config';
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,
     NotificationsModule, SearchModule, ViewsModule, ReportsModule,
     AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, PushModule, RealtimeModule, WorkersModule,
-    ClientErrorsModule,
+    ClientErrorsModule, HealthModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },

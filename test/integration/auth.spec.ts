@@ -44,6 +44,43 @@ describe('Auth', () => {
     expect(res.body).toMatchObject({ success: false, error: { code: 409 } });
   });
 
+  describe('signup gate (internal tool: invite-only in production)', () => {
+    const saved = { enabled: process.env.SIGNUP_ENABLED, env: process.env.NODE_ENV };
+    afterEach(() => {
+      if (saved.enabled === undefined) delete process.env.SIGNUP_ENABLED; else process.env.SIGNUP_ENABLED = saved.enabled;
+      process.env.NODE_ENV = saved.env;
+    });
+
+    it('SIGNUP_ENABLED=false returns 403 and creates no user', async () => {
+      process.env.SIGNUP_ENABLED = 'false';
+      const email = uniqEmail('gated');
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/auth/signup')
+        .send({ email, password: 'StrongPass123!', name: 'Gated' });
+      expect(res.status).toBe(403);
+      expect(res.body.error.message).toMatch(/invite-only/i);
+      expect(await prisma().user.findUnique({ where: { email } })).toBeNull();
+    });
+
+    it('defaults to closed when NODE_ENV=production and SIGNUP_ENABLED is unset', async () => {
+      delete process.env.SIGNUP_ENABLED;
+      process.env.NODE_ENV = 'production';
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/auth/signup')
+        .send({ email: uniqEmail('prod'), password: 'StrongPass123!', name: 'Prod' });
+      expect(res.status).toBe(403);
+    });
+
+    it('SIGNUP_ENABLED=true re-opens signup even in production', async () => {
+      process.env.SIGNUP_ENABLED = 'true';
+      process.env.NODE_ENV = 'production';
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/auth/signup')
+        .send({ email: uniqEmail('open'), password: 'StrongPass123!', name: 'Open' });
+      expect(res.status).toBe(201);
+    });
+  });
+
   it('login with correct password works and returns workspaces array', async () => {
     const { user, password } = await createUser();
     const res = await request(app.getHttpServer())

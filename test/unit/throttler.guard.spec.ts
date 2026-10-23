@@ -14,12 +14,21 @@ describe('UserAwareThrottlerGuard.getTracker', () => {
     expect(await tracker({ user: { userId: 'u-123' }, ip: '1.2.3.4' })).toBe('user:u-123');
   });
 
-  it('falls back to the first X-Forwarded-For hop for anonymous requests', async () => {
-    expect(await tracker({ headers: { 'x-forwarded-for': '203.0.113.7, 10.0.0.1' }, ip: '10.0.0.1' })).toBe('ip:203.0.113.7');
+  it('keys anonymous requests on CF-Connecting-IP (set by Cloudflare, not spoofable through the tunnel)', async () => {
+    expect(await tracker({ headers: { 'cf-connecting-ip': '203.0.113.7' }, ip: '127.0.0.1' })).toBe('ip:203.0.113.7');
   });
 
-  it('uses req.ip when there is no forwarded header', async () => {
+  it('ignores a client-supplied X-Forwarded-For — one header per request used to reset the login limit', async () => {
+    const key = await tracker({ headers: { 'x-forwarded-for': '1.1.1.1, 2.2.2.2' }, ip: '198.51.100.2' });
+    expect(key).toBe('ip:198.51.100.2');
+  });
+
+  it('uses req.ip (Express trust-proxy resolved) when there is no CF header', async () => {
     expect(await tracker({ headers: {}, ip: '198.51.100.2' })).toBe('ip:198.51.100.2');
+  });
+
+  it('treats a blank CF header as absent', async () => {
+    expect(await tracker({ headers: { 'cf-connecting-ip': '  ' }, ip: '198.51.100.2' })).toBe('ip:198.51.100.2');
   });
 
   it('returns ip:unknown when neither user, forwarded header, nor ip is available', async () => {

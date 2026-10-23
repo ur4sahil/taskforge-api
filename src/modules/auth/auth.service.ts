@@ -1,10 +1,11 @@
-import { Injectable, ConflictException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, ConflictException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SignupDto, LoginDto, RefreshTokenDto } from './dto';
+import { signupEnabled } from '../../config';
 
 @Injectable()
 export class AuthService {
@@ -15,6 +16,7 @@ export class AuthService {
   ) {}
 
   async signup(dto: SignupDto, ip?: string, ua?: string) {
+    if (!signupEnabled()) throw new ForbiddenException('Sign-ups are invite-only. Ask your workspace admin for an invitation.');
     const existing = await this.prisma.user.findUnique({ where: { email: dto.email.toLowerCase() } });
     if (existing) throw new ConflictException('Email taken');
 
