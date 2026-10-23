@@ -385,4 +385,32 @@ describe('Invitations — public accept', () => {
     await request(srv()).post('/api/v1/invitations/accept/accept-once').send({ password: 'FirstTime1!' }).expect(201);
     await request(srv()).post('/api/v1/invitations/accept/accept-once').send({ password: 'FirstTime1!' }).expect(400);
   });
+
+  it('new member inherits the workspace timezone from settings', async () => {
+    const { workspace, member } = await seedAdmin();
+    await prisma().workspace.update({ where: { id: workspace.id }, data: { settings: { timezone: 'America/Chicago' } } });
+    await seedInvitation({ workspaceId: workspace.id, invitedBy: member.id, email: 'tz@example.com', token: 'accept-tz' });
+
+    await request(srv()).post('/api/v1/invitations/accept/accept-tz').send({ password: 'TzPass123!' }).expect(201);
+    const u = await prisma().user.findUnique({ where: { email: 'tz@example.com' } });
+    const m = await prisma().workspaceMember.findFirst({ where: { workspaceId: workspace.id, userId: u!.id } });
+    expect(m!.timezone).toBe('America/Chicago');
+  });
+
+  it('new member defaults to America/New_York when the workspace has no (or an invalid) timezone setting', async () => {
+    const { workspace, member } = await seedAdmin(); // factory settings carry no timezone
+    await seedInvitation({ workspaceId: workspace.id, invitedBy: member.id, email: 'default-tz@example.com', token: 'accept-default-tz' });
+    await request(srv()).post('/api/v1/invitations/accept/accept-default-tz').send({ password: 'TzPass123!' }).expect(201);
+    const u = await prisma().user.findUnique({ where: { email: 'default-tz@example.com' } });
+    const m = await prisma().workspaceMember.findFirst({ where: { workspaceId: workspace.id, userId: u!.id } });
+    expect(m!.timezone).toBe('America/New_York');
+
+    const { workspace: ws2, member: m2 } = await seedAdmin();
+    await prisma().workspace.update({ where: { id: ws2.id }, data: { settings: { timezone: 'Not/AZone' } } });
+    await seedInvitation({ workspaceId: ws2.id, invitedBy: m2.id, email: 'bad-tz@example.com', token: 'accept-bad-tz' });
+    await request(srv()).post('/api/v1/invitations/accept/accept-bad-tz').send({ password: 'TzPass123!' }).expect(201);
+    const u2 = await prisma().user.findUnique({ where: { email: 'bad-tz@example.com' } });
+    const row2 = await prisma().workspaceMember.findFirst({ where: { workspaceId: ws2.id, userId: u2!.id } });
+    expect(row2!.timezone).toBe('America/New_York');
+  });
 });

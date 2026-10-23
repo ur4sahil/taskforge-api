@@ -1,8 +1,8 @@
 import { Controller, Post, Get, Patch, Body, Param, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { WorkspacesService } from './workspaces.service';
-import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto } from './dto';
-import { CurrentUser, Roles } from '../../common/decorators';
+import { CreateWorkspaceDto, UpdateWorkspaceDto, UpdateMemberDto, UpdateOwnMemberDto } from './dto';
+import { CurrentMember, CurrentUser, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
 import { successResponse, PaginationDto } from '../../common/dto/response.dto';
 
@@ -38,6 +38,14 @@ export class WorkspacesController {
   async members(@Param('wid') wid: string, @Query() p: PaginationDto) {
     const r = await this.svc.getMembers(wid, p.page, p.perPage);
     return successResponse(r.members, r.meta);
+  }
+
+  // Any active member sets their OWN timezone. Declared before ':mid' — Nest
+  // matches routes in declaration order, so after it "me" would be read as an id.
+  @Patch(':wid/members/me')
+  @UseGuards(WorkspaceGuard)
+  async updateOwnMember(@Param('wid') wid: string, @CurrentMember() me: any, @Body() dto: UpdateOwnMemberDto) {
+    return successResponse(await this.svc.updateOwnTimezone(wid, me.id, dto.timezone));
   }
 
   @Patch(':wid/members/:mid')

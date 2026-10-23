@@ -7,6 +7,7 @@ import { appConfig, authConfig, redisConfig, storageConfig, aiConfig, pushConfig
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module';
+import { UsersModule } from './modules/users/users.module';
 import { ListsModule } from './modules/lists/lists.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { CommentsModule } from './modules/comments/comments.module';
@@ -57,7 +58,7 @@ import { HealthModule } from './modules/health/health.module';
     }),
     PrismaModule,
     EmailModule,
-    AuthModule, WorkspacesModule, InvitationsModule, ListsModule, TasksModule, CommentsModule,
+    AuthModule, UsersModule, WorkspacesModule, InvitationsModule, ListsModule, TasksModule, CommentsModule,
     AttachmentsModule, RemindersModule, RecurrenceModule, TemplatesModule,
     NotificationsModule, SearchModule, ViewsModule, ReportsModule,
     AiModule, AuditModule, TrashModule, EmailIngestionModule, MessagesModule, PushModule, RealtimeModule, WorkersModule,

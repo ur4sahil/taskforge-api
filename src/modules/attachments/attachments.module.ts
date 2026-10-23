@@ -6,6 +6,7 @@ import { CurrentMember } from '../../common/decorators';
 import { WorkspaceGuard } from '../../common/guards';
 import { successResponse } from '../../common/dto/response.dto';
 import { R2StorageService } from '../../common/utils/r2-storage';
+import { getTaskPermissions } from '../../common/utils/permissions';
 
 // Multer caps the streamed body at this size and aborts before buffering the
 // rest. Without this, multer reads the entire request into memory first and
@@ -26,16 +27,28 @@ export class AttachmentsService {
       include: { uploadedBy: { include: { user: { select: { id: true, name: true } } } } },
     });
   }
-  async uploadToTask(wid: string, tid: string, file: any, uid: string) {
+  /** Upload is gated by getTaskPermissions().canAttach: admin, task creator,
+   *  assignee, or the assignee's manager. Anyone else in the workspace gets 403. */
+  async uploadToTask(wid: string, tid: string, file: any, member: any) {
     if (!file || !file.buffer) throw new BadRequestException('No file provided');
     if (file.size > MAX_UPLOAD_BYTES) throw new PayloadTooLargeException('File too large (max 50 MB)');
     const ext = '.' + (file.originalname || '').split('.').pop()?.toLowerCase();
     if (BLOCKED.includes(ext)) throw new BadRequestException('Blocked file type');
-    const task = await this.prisma.task.findFirst({ where: { id: tid, workspaceId: wid, deletedAt: null } });
+    const task = await this.prisma.task.findFirst({
+      where: { id: tid, workspaceId: wid, deletedAt: null },
+      include: { creator: { select: { role: true } }, assignee: { select: { managerId: true } } },
+    });
     if (!task) throw new NotFoundException('Task not found');
+    const perms = getTaskPermissions({
+      memberId: member.id, memberRole: member.role,
+      taskCreatorId: task.creatorId, taskCreatorRole: task.creator?.role,
+      taskAssigneeId: task.assigneeId, taskAssigneeManagerId: task.assignee?.managerId,
+      taskIsLocked: task.isLocked,
+    });
+    if (!perms.canAttach) throw new ForbiddenException('Cannot attach files to this task');
     const storageKey = `${wid}/${tid}/${uuidv4()}-${file.originalname}`;
     await this.storage.upload(storageKey, file.buffer, file.mimetype);
-    return this.prisma.attachment.create({ data: { workspaceId: wid, taskId: tid, commentId: null, uploadedById: uid, fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype, storageKey } });
+    return this.prisma.attachment.create({ data: { workspaceId: wid, taskId: tid, commentId: null, uploadedById: member.id, fileName: file.originalname, fileSize: file.size, mimeType: file.mimetype, storageKey } });
   }
   /** Task attachments only (chat attachments are served by the messages module and
    *  must not be fetchable here). The attachment AND its task must be in this workspace. */
@@ -63,7 +76,7 @@ export class AttachmentsController {
   async list(@Param('wid') w: string, @Param('tid') t: string) { return successResponse(await this.svc.listForTask(w, t)); }
   @Post('tasks/:tid/attachments')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
-  async toTask(@Param('wid') w: string, @Param('tid') t: string, @UploadedFile() f: any, @CurrentMember() m: any) { return successResponse(await this.svc.uploadToTask(w, t, f, m.id)); }
+  async toTask(@Param('wid') w: string, @Param('tid') t: string, @UploadedFile() f: any, @CurrentMember() m: any) { return successResponse(await this.svc.uploadToTask(w, t, f, m)); }
   @Get('attachments/:aid/url')
   async url(@Param('wid') w: string, @Param('aid') a: string) { return successResponse(await this.svc.getUrl(w, a)); }
   @Delete('attachments/:aid')

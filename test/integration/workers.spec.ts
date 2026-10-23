@@ -11,7 +11,8 @@ import {
 } from '../../src/workers/workers.module';
 import { prisma, truncateAll, disconnect } from '../fixtures/db';
 import { seedWorkspace, createTask } from '../fixtures/factories';
-import { todayKey, dateKeyToDb, DEFAULT_WORKSPACE_TIMEZONE } from '../../src/common/utils/dates';
+import { todayKey, dateKeyToDb, dbDateToKey, DEFAULT_WORKSPACE_TIMEZONE } from '../../src/common/utils/dates';
+import { addDays, addMonthsClamped, parseKey } from '../../src/common/utils/recurrence';
 
 // Overdue is judged by calendar day in the workspace timezone (default
 // America/New_York). "Now minus 24h" can still be today there, so build
@@ -28,16 +29,20 @@ beforeAll(async () => { await truncateAll(); });
 afterAll(async () => { await disconnect(); });
 beforeEach(async () => { await truncateAll(); });
 
+// Recurrence is calendar-day math in the rule's timezone; these rules use 'UTC'
+// so "today" and the stored @db.Date keys share a calendar.
+const todayUtc = () => todayKey('UTC');
+
 describe('RecurringTaskProcessor', () => {
-  it('generates a Task + TaskInstance for a daily rule whose nextOccurrence is due', async () => {
+  it('fills the 7-day horizon for a daily rule in one tick: one Task + TaskInstance per day, nextOccurrence past the horizon', async () => {
     const { workspace, list, member } = await seedWorkspace();
-    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, title: 'Daily standup' });
-    const due = new Date(Date.now() - 60_000); // already due
+    // Source task due yesterday; the rule says the next occurrence is today.
+    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, title: 'Daily standup', dueDate: dateKeyToDb(addDays(todayUtc(), -1)) });
     await prisma().recurrenceRule.create({
       data: {
         taskId: parent.id, workspaceId: workspace.id,
         frequency: 'daily' as any, interval: 1,
-        nextOccurrence: due, isActive: true, timezone: 'UTC',
+        nextOccurrence: dateKeyToDb(todayUtc()), isActive: true, timezone: 'UTC',
         endType: 'never' as any,
       },
     });
@@ -45,31 +50,47 @@ describe('RecurringTaskProcessor', () => {
     const p = new RecurringTaskProcessor(prisma() as any);
     await p.process(fakeJob);
 
-    const instances = await prisma().taskInstance.findMany({});
-    expect(instances).toHaveLength(1);
+    const instances = await prisma().taskInstance.findMany({ orderBy: { occurrenceDate: 'asc' } });
+    expect(instances.map(i => dbDateToKey(i.occurrenceDate))).toEqual([0, 1, 2, 3, 4, 5, 6, 7].map(d => addDays(todayUtc(), d)));
     const tasks = await prisma().task.findMany({ where: { source: 'recurring' as any } });
-    expect(tasks).toHaveLength(1);
-    expect(tasks[0].title).toBe('Daily standup');
-    // nextOccurrence advances by exactly one day.
+    expect(tasks).toHaveLength(8);
+    expect(new Set(tasks.map(t => t.title))).toEqual(new Set(['Daily standup']));
+    expect(tasks.every(t => t.status === 'todo' && t.listId === list.id && t.creatorId === member.id)).toBe(true);
     const rule = await prisma().recurrenceRule.findFirst({});
-    const advance = rule!.nextOccurrence!.getTime() - due.getTime();
-    expect(advance).toBe(86_400_000);
+    expect(dbDateToKey(rule!.nextOccurrence!)).toBe(addDays(todayUtc(), 8));
+    expect(rule!.lastGenerated).not.toBeNull();
+    expect(rule!.isActive).toBe(true);
   });
 
-  it('does not double-generate if a TaskInstance for the same occurrence already exists', async () => {
+  it('catches up every missed occurrence in one tick (nextOccurrence far in the past)', async () => {
     const { workspace, list, member } = await seedWorkspace();
-    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id });
-    const due = new Date(Date.now() - 60_000);
+    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: dateKeyToDb(addDays(todayUtc(), -30)) });
+    await prisma().recurrenceRule.create({
+      data: { taskId: parent.id, workspaceId: workspace.id, frequency: 'daily' as any, interval: 1, nextOccurrence: dateKeyToDb(addDays(todayUtc(), -29)), isActive: true, timezone: 'UTC', endType: 'never' as any },
+    });
+    await new RecurringTaskProcessor(prisma() as any).process(fakeJob);
+    // -29 .. +7 inclusive = 37 occurrences.
+    expect(await prisma().taskInstance.count()).toBe(37);
+    const rule = await prisma().recurrenceRule.findFirst({});
+    expect(dbDateToKey(rule!.nextOccurrence!)).toBe(addDays(todayUtc(), 8));
+  });
+
+  it('does not double-generate an occurrence whose TaskInstance already exists (unique index), and leaves no orphan task', async () => {
+    const { workspace, list, member } = await seedWorkspace();
+    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: dateKeyToDb(addDays(todayUtc(), -1)) });
+    const due = dateKeyToDb(todayUtc());
     const rule = await prisma().recurrenceRule.create({
       data: { taskId: parent.id, workspaceId: workspace.id, frequency: 'daily' as any, interval: 1, nextOccurrence: due, isActive: true, timezone: 'UTC', endType: 'never' as any },
     });
     await prisma().taskInstance.create({ data: { recurrenceRuleId: rule.id, taskId: parent.id, occurrenceDate: due } });
 
-    const p = new RecurringTaskProcessor(prisma() as any);
-    await p.process(fakeJob);
+    await new RecurringTaskProcessor(prisma() as any).process(fakeJob);
 
-    expect(await prisma().task.count({ where: { source: 'recurring' as any } })).toBe(0);
-    expect(await prisma().taskInstance.count()).toBe(1);
+    expect(await prisma().taskInstance.count({ where: { occurrenceDate: due } })).toBe(1);
+    expect(await prisma().task.count({ where: { source: 'recurring' as any, dueDate: due } })).toBe(0);
+    // The rest of the horizon is still filled.
+    expect(await prisma().taskInstance.count()).toBe(8);
+    expect(await prisma().task.count({ where: { source: 'recurring' as any } })).toBe(7);
   });
 
   it('skips inactive rules entirely', async () => {
@@ -82,17 +103,47 @@ describe('RecurringTaskProcessor', () => {
     expect(await prisma().taskInstance.count()).toBe(0);
   });
 
-  it('weekly rule advances nextOccurrence by 7 × interval days', async () => {
+  it('skips rules whose source task is trashed (archived sources keep going — done tasks auto-archive)', async () => {
     const { workspace, list, member } = await seedWorkspace();
-    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id });
-    const due = new Date('2026-05-01T09:00:00Z');
+    for (const data of [{ deletedAt: new Date() }]) {
+      const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: dateKeyToDb(addDays(todayUtc(), -1)) });
+      await prisma().task.update({ where: { id: parent.id }, data });
+      await prisma().recurrenceRule.create({
+        data: { taskId: parent.id, workspaceId: workspace.id, frequency: 'daily' as any, interval: 1, nextOccurrence: dateKeyToDb(todayUtc()), isActive: true, timezone: 'UTC', endType: 'never' as any },
+      });
+    }
+    await new RecurringTaskProcessor(prisma() as any).process(fakeJob);
+    expect(await prisma().taskInstance.count()).toBe(0);
+  });
+
+  it('weekly rule: one instance in the horizon, nextOccurrence advances 7 × interval days from the anchor schedule', async () => {
+    const { workspace, list, member } = await seedWorkspace();
+    // Anchor 13 days ago; every 2 weeks → tomorrow, then 14 days after that.
+    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: dateKeyToDb(addDays(todayUtc(), -13)) });
     await prisma().recurrenceRule.create({
-      data: { taskId: parent.id, workspaceId: workspace.id, frequency: 'weekly' as any, interval: 2, nextOccurrence: due, isActive: true, timezone: 'UTC', endType: 'never' as any },
+      data: { taskId: parent.id, workspaceId: workspace.id, frequency: 'weekly' as any, interval: 2, nextOccurrence: dateKeyToDb(addDays(todayUtc(), 1)), isActive: true, timezone: 'UTC', endType: 'never' as any },
     });
     await new RecurringTaskProcessor(prisma() as any).process(fakeJob);
+    const instances = await prisma().taskInstance.findMany({});
+    expect(instances.map(i => dbDateToKey(i.occurrenceDate))).toEqual([addDays(todayUtc(), 1)]);
     const rule = await prisma().recurrenceRule.findFirst({});
-    // 2 weeks = 14 days
-    expect(rule!.nextOccurrence!.getTime() - due.getTime()).toBe(14 * 86_400_000);
+    expect(dbDateToKey(rule!.nextOccurrence!)).toBe(addDays(todayUtc(), 15));
+  });
+
+  it('monthly rule advances by whole months on dayOfMonth (clamped), not by setMonth drift', async () => {
+    const { workspace, list, member } = await seedWorkspace();
+    const occurrence = addDays(todayUtc(), 3);
+    const dom = parseKey(occurrence).d;
+    const anchor = addMonthsClamped(occurrence, -1, dom);
+    const parent = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: member.id, dueDate: dateKeyToDb(anchor) });
+    await prisma().recurrenceRule.create({
+      data: { taskId: parent.id, workspaceId: workspace.id, frequency: 'monthly' as any, interval: 1, dayOfMonth: dom, nextOccurrence: dateKeyToDb(occurrence), isActive: true, timezone: 'UTC', endType: 'never' as any },
+    });
+    await new RecurringTaskProcessor(prisma() as any).process(fakeJob);
+    const instances = await prisma().taskInstance.findMany({});
+    expect(instances.map(i => dbDateToKey(i.occurrenceDate))).toEqual([occurrence]);
+    const rule = await prisma().recurrenceRule.findFirst({});
+    expect(dbDateToKey(rule!.nextOccurrence!)).toBe(addMonthsClamped(occurrence, 1, dom));
   });
 });
 

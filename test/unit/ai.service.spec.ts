@@ -7,7 +7,14 @@ import { AiService } from '../../src/modules/ai/ai.module';
 function makeConfig(key?: string): ConfigService {
   return { get: (k: string) => (k === 'ai.anthropicApiKey' ? key : undefined) } as any;
 }
-const prismaStub = { task: { findMany: jest.fn().mockResolvedValue([{ id: 't1', title: 'Task', status: 'todo' }]) } } as any;
+// chat() scopes the context through getAccessibleListIds for non-admins, which
+// touches list / listMember / workspaceMember — stub those too.
+const prismaStub = {
+  task: { findMany: jest.fn().mockResolvedValue([{ id: 't1', title: 'Task', status: 'todo' }]) },
+  list: { findMany: jest.fn().mockResolvedValue([{ id: 'l1' }]) },
+  listMember: { findMany: jest.fn().mockResolvedValue([{ listId: 'l1' }]) },
+  workspaceMember: { findMany: jest.fn().mockResolvedValue([]) },
+} as any;
 
 const originalFetch = global.fetch;
 afterEach(() => { global.fetch = originalFetch; jest.clearAllMocks(); });

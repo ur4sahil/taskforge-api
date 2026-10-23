@@ -5,8 +5,11 @@ import { CurrentMember, Roles } from '../../common/decorators';
 import { WorkspaceGuard, RolesGuard } from '../../common/guards';
 import { successResponse, PaginationDto, paginationMeta } from '../../common/dto/response.dto';
 import { getTaskPermissions } from '../../common/utils/permissions';
-import { CreateTaskDto, UpdateTaskDto, TaskFilterDto, CreateChecklistItemDto, UpdateChecklistItemDto, ReorderChecklistDto } from './dto';
+import { getAccessibleListIds } from '../../common/utils/list-access';
+import { workspaceTimezone, todayKey, dateKeyToDb } from '../../common/utils/dates';
+import { CreateTaskDto, UpdateTaskDto, TaskFilterDto, CreateChecklistItemDto, UpdateChecklistItemDto, ReorderChecklistDto, isFlagOn } from './dto';
 import { NotificationsModule, NotificationsService } from '../notifications/notifications.module';
+import { RemindersModule, RemindersService } from '../reminders/reminders.module';
 
 const TASK_INCLUDE = {
   creator: { include: { user: { select: { id: true, name: true, avatarUrl: true } } } },
@@ -18,7 +21,7 @@ const TASK_INCLUDE = {
 
 @Injectable()
 export class TasksService {
-  constructor(private prisma: PrismaService, private notifications: NotificationsService) {}
+  constructor(private prisma: PrismaService, private notifications: NotificationsService, private reminders: RemindersService) {}
 
   async create(wid: string, lid: string, dto: CreateTaskDto, member: any) {
     // The target list must live in this workspace (404 otherwise — never leak
@@ -114,15 +117,48 @@ export class TasksService {
     })));
   }
 
+  /** Live tasks only by default: archived tasks (archivedAt set) are hidden from
+   *  every listing and only come back with ?archived=1 — which then shows ONLY
+   *  archived ones. Trashed tasks (deletedAt) never appear here; see TrashModule. */
+  private archiveScope(f: TaskFilterDto) {
+    return { deletedAt: null, archivedAt: isFlagOn(f.archived) ? { not: null } : null };
+  }
+
+  /** Filter fragments shared by findAll and findByList. Each one is AND-ed so
+   *  that, e.g., overdue=1 and status=todo both apply. */
+  private async buildFilters(wid: string, member: any, f: TaskFilterDto): Promise<any[]> {
+    const and: any[] = [];
+    if (f.status) and.push({ status: f.status });
+    if (f.priority) and.push({ priority: f.priority });
+    if (f.assigneeId) and.push({ assigneeId: f.assigneeId });
+    if (f.creatorId) and.push({ creatorId: f.creatorId });
+    if (isFlagOn(f.mine)) and.push({ assigneeId: member.id });
+    if (f.q) and.push({ OR: [{ title: { contains: f.q, mode: 'insensitive' } }, { description: { contains: f.q, mode: 'insensitive' } }] });
+    // Inclusive calendar-day bounds. dueDate is a @db.Date (midnight UTC of the
+    // day), so comparing against dateKeyToDb() is an exact day comparison.
+    if (f.dueFrom) and.push({ dueDate: { gte: dateKeyToDb(f.dueFrom) } });
+    if (f.dueTo) and.push({ dueDate: { lte: dateKeyToDb(f.dueTo) } });
+    if (isFlagOn(f.overdue)) {
+      // "Today" is the workspace's calendar day, not the server's — see dates.ts.
+      const ws = await this.prisma.workspace.findUnique({ where: { id: wid }, select: { settings: true } });
+      const today = dateKeyToDb(todayKey(workspaceTimezone(ws?.settings)));
+      and.push({ dueDate: { lt: today } }, { status: { not: 'done' } });
+    }
+    return and;
+  }
+
   async findAll(wid: string, member: any, f: TaskFilterDto, page: number, perPage: number) {
-    const where: any = { workspaceId: wid, deletedAt: null, parentTaskId: null };
+    const where: any = { workspaceId: wid, parentTaskId: null, ...this.archiveScope(f) };
     if (member.role !== 'admin') {
       const ids = await this.getAccessibleListIds(wid, member);
-      where.listId = { in: ids };
+      // ?listId= narrows within what the caller may see; a list outside that set
+      // yields an empty page rather than confirming the list exists.
+      where.listId = f.listId ? { in: ids.includes(f.listId) ? [f.listId] : [] } : { in: ids };
+    } else if (f.listId) {
+      where.listId = f.listId;
     }
-    if (f.status) where.status = f.status;
-    if (f.priority) where.priority = f.priority;
-    if (f.assigneeId) where.assigneeId = f.assigneeId;
+    const and = await this.buildFilters(wid, member, f);
+    if (and.length) where.AND = and;
     const orderBy: any = { [f.sortBy || 'createdAt']: f.sortOrder || 'desc' };
     const [tasks, total] = await Promise.all([
       this.prisma.task.findMany({ where, include: TASK_INCLUDE, skip: (page - 1) * perPage, take: perPage, orderBy }),
@@ -131,10 +167,18 @@ export class TasksService {
     return { tasks, meta: paginationMeta(total, page, perPage) };
   }
 
-  async findByList(wid: string, lid: string, f: TaskFilterDto, page: number, perPage: number) {
-    const where: any = { workspaceId: wid, listId: lid, deletedAt: null, parentTaskId: null };
-    if (f.status) where.status = f.status;
-    if (f.priority) where.priority = f.priority;
+  async findByList(wid: string, lid: string, member: any, f: TaskFilterDto, page: number, perPage: number) {
+    // Same gate as create: the list must be in this workspace (404, never leak
+    // existence) and visible to the caller (403) — admins see every list.
+    const list = await this.prisma.list.findFirst({ where: { id: lid, workspaceId: wid }, select: { id: true } });
+    if (!list) throw new NotFoundException('List not found');
+    if (member.role !== 'admin') {
+      const accessible = await this.getAccessibleListIds(wid, member);
+      if (!accessible.includes(lid)) throw new ForbiddenException('No access to this list');
+    }
+    const where: any = { workspaceId: wid, listId: lid, parentTaskId: null, ...this.archiveScope(f) };
+    const and = await this.buildFilters(wid, member, f);
+    if (and.length) where.AND = and;
     const [tasks, total] = await Promise.all([
       this.prisma.task.findMany({ where, include: TASK_INCLUDE, skip: (page - 1) * perPage, take: perPage, orderBy: { createdAt: 'desc' } }),
       this.prisma.task.count({ where }),
@@ -165,12 +209,37 @@ export class TasksService {
     if (dto.assigneeId !== undefined) data.assigneeId = dto.assigneeId;
     if (dto.startDate !== undefined) data.startDate = dto.startDate ? new Date(dto.startDate) : null;
     if (dto.dueDate !== undefined) data.dueDate = dto.dueDate ? new Date(dto.dueDate) : null;
+    if (dto.startTime !== undefined) data.startTime = dto.startTime;
+    if (dto.dueTime !== undefined) data.dueTime = dto.dueTime;
+    if (dto.timezone !== undefined) data.timezone = dto.timezone;
     if (dto.status !== undefined) {
       data.status = dto.status;
       if (dto.status === 'done' && task.status !== 'done') data.completedAt = new Date();
       else if (dto.status !== 'done' && task.status === 'done') data.completedAt = null;
     }
+    // Move: same rule as create() — the target list must be in this workspace
+    // (404, never leak existence) and visible to the caller (403). Subtasks
+    // follow their parent so a task never straddles two lists.
+    const moving = dto.listId !== undefined && dto.listId !== task.listId;
+    if (moving) {
+      const list = await this.prisma.list.findFirst({ where: { id: dto.listId!, workspaceId: wid }, select: { id: true } });
+      if (!list) throw new NotFoundException('List not found');
+      if (member.role !== 'admin') {
+        const accessible = await this.getAccessibleListIds(wid, member);
+        if (!accessible.includes(dto.listId!)) throw new ForbiddenException('No access to this list');
+      }
+      data.listId = dto.listId;
+    }
     const updated = await this.prisma.task.update({ where: { id: tid }, data, include: TASK_INCLUDE });
+    if (moving) await this.prisma.task.updateMany({ where: { parentTaskId: tid, workspaceId: wid }, data: { listId: dto.listId! } });
+
+    // Relative reminders are anchored on the due instant: re-anchor them whenever
+    // the due day or time actually changed. Awaited so the response reflects the
+    // new fire times; a failure here must not undo the saved task, so it is
+    // swallowed (the reminders worker tolerates a stale nextFireTime).
+    const dueChanged = (dto.dueDate !== undefined || dto.dueTime !== undefined)
+      && ((updated.dueDate?.getTime() ?? null) !== (task.dueDate?.getTime() ?? null) || updated.dueTime !== task.dueTime);
+    if (dueChanged) await this.reminders.recomputeForTask(tid).catch(() => {});
 
     // Notify on assignee change (reassignment) and status change.
     if (dto.assigneeId !== undefined && dto.assigneeId && dto.assigneeId !== task.assigneeId) {
@@ -208,6 +277,24 @@ export class TasksService {
     const task = await this.findOne(wid, tid);
     if (!this.getPerms(member, task).canDelete) throw new ForbiddenException('Cannot restore');
     return this.prisma.task.update({ where: { id: tid }, data: { deletedAt: null }, include: TASK_INCLUDE });
+  }
+
+  /** Archive hides a task from every listing without trashing it. Any status is
+   *  allowed — people archive stale todo tasks as much as finished ones; the
+   *  auto-archive worker is the only path that insists on `done`. Permission is
+   *  canFullEdit, the same as editing the task. A trashed task cannot be archived
+   *  (restore it first) so a task is never in both places at once. */
+  async archive(wid: string, tid: string, member: any) {
+    const task = await this.findOne(wid, tid);
+    if (!this.getPerms(member, task).canFullEdit) throw new ForbiddenException('Cannot archive');
+    if (task.deletedAt) throw new BadRequestException('Task is in the trash');
+    return this.prisma.task.update({ where: { id: tid }, data: { archivedAt: new Date() }, include: TASK_INCLUDE });
+  }
+
+  async unarchive(wid: string, tid: string, member: any) {
+    const task = await this.findOne(wid, tid);
+    if (!this.getPerms(member, task).canFullEdit) throw new ForbiddenException('Cannot unarchive');
+    return this.prisma.task.update({ where: { id: tid }, data: { archivedAt: null }, include: TASK_INCLUDE });
   }
 
   /** Loads the task (404 if not in this workspace) and enforces the checklist
@@ -269,18 +356,9 @@ export class TasksService {
     });
   }
 
-  private async getAccessibleListIds(wid: string, member: any): Promise<string[]> {
-    if (member.role === 'admin') {
-      return (await this.prisma.list.findMany({ where: { workspaceId: wid }, select: { id: true } })).map((l: any) => l.id);
-    }
-    if (member.role === 'manager') {
-      const rids = (await this.prisma.workspaceMember.findMany({ where: { managerId: member.id, workspaceId: wid }, select: { id: true } })).map((r: any) => r.id);
-      return (await this.prisma.list.findMany({
-        where: { workspaceId: wid, OR: [{ members: { some: { workspaceMemberId: member.id } } }, { members: { some: { workspaceMemberId: { in: rids } } } }] },
-        select: { id: true },
-      })).map((l: any) => l.id);
-    }
-    return (await this.prisma.listMember.findMany({ where: { workspaceMemberId: member.id }, select: { listId: true } })).map((l: any) => l.listId);
+  /** Shared rule — see common/utils/list-access.ts (also used by search + AI). */
+  private getAccessibleListIds(wid: string, member: any): Promise<string[]> {
+    return getAccessibleListIds(this.prisma, wid, member);
   }
 }
 
@@ -303,8 +381,8 @@ export class TasksController {
   }
 
   @Get('lists/:lid/tasks')
-  async byList(@Param('wid') w: string, @Param('lid') l: string, @Query() f: TaskFilterDto, @Query() p: PaginationDto) {
-    const r = await this.svc.findByList(w, l, f, p.page, p.perPage);
+  async byList(@Param('wid') w: string, @Param('lid') l: string, @CurrentMember() m: any, @Query() f: TaskFilterDto, @Query() p: PaginationDto) {
+    const r = await this.svc.findByList(w, l, m, f, p.page, p.perPage);
     return successResponse(r.tasks, r.meta);
   }
 
@@ -341,6 +419,20 @@ export class TasksController {
     return successResponse(await this.svc.restore(w, t, m));
   }
 
+  @Post('tasks/:tid/archive')
+  async archive(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any, @Req() r: Request) {
+    const task = await this.svc.archive(w, t, m);
+    r.__auditData = { action: 'task.archived', entityType: 'task', entityId: t, changes: {} };
+    return successResponse(task);
+  }
+
+  @Post('tasks/:tid/unarchive')
+  async unarchive(@Param('wid') w: string, @Param('tid') t: string, @CurrentMember() m: any, @Req() r: Request) {
+    const task = await this.svc.unarchive(w, t, m);
+    r.__auditData = { action: 'task.unarchived', entityType: 'task', entityId: t, changes: {} };
+    return successResponse(task);
+  }
+
   @Post('tasks/:tid/checklist')
   async addChecklist(@Param('wid') w: string, @Param('tid') t: string, @Body() d: CreateChecklistItemDto, @CurrentMember() m: any) {
     return successResponse(await this.svc.addChecklist(w, t, d, m));
@@ -367,7 +459,7 @@ export class TasksController {
 }
 
 @Module({
-  imports: [NotificationsModule],
+  imports: [NotificationsModule, RemindersModule],
   controllers: [TasksController],
   providers: [TasksService],
   exports: [TasksService],

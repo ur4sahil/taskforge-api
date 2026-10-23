@@ -20,6 +20,7 @@ import { EmailService } from '../../common/email/email.module';
 import { AuthService } from '../auth/auth.service';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationsModule, NotificationsService } from '../notifications/notifications.module';
+import { workspaceTimezone } from '../../common/utils/dates';
 
 // ───── DTOs ──────────────────────────────────────────────────────────────────
 
@@ -217,7 +218,7 @@ export class InvitationsService {
           userId: user.id,
           role: inv.role,
           managerId: inv.managerId ?? null,
-          timezone: 'UTC',
+          timezone: workspaceTimezone((await this.prisma.workspace.findUnique({ where: { id: inv.workspaceId }, select: { settings: true } }))?.settings),
           isActive: true,
           invitedBy: inv.invitedBy,
         },

@@ -9,7 +9,7 @@ import { HttpExceptionFilter } from '../../src/common/filters/http-exception.fil
 import { R2StorageService } from '../../src/common/utils/r2-storage';
 import { truncateAll, disconnect, prisma } from '../fixtures/db';
 import { authHeader } from '../fixtures/auth';
-import { seedWorkspace, createTask } from '../fixtures/factories';
+import { seedWorkspace, createUser, addMember, createTask } from '../fixtures/factories';
 
 class StubStorage {
   uploads: Array<{ key: string; size: number; mime: string }> = [];
@@ -118,5 +118,49 @@ describe('Attachments', () => {
       .set(authHeader(user.id, user.email));
     expect(del.status).toBe(200);
     expect(await prisma().attachment.findUnique({ where: { id: up.body.data.id } })).toBeNull();
+  });
+});
+
+describe('Attachments — canAttach', () => {
+  const upload = (wid: string, tid: string, h: any) => request(app.getHttpServer())
+    .post(`/api/v1/workspaces/${wid}/tasks/${tid}/attachments`).set(h)
+    .attach('file', Buffer.from('x'), { filename: 'x.txt', contentType: 'text/plain' });
+
+  it('stranger employee → 403 and nothing stored; assignee, creator, manager-of-assignee and admin → 201', async () => {
+    const { user: admin, workspace, list, member: adminMember } = await seedWorkspace();
+    const { user: stranger } = await createUser();
+    await addMember(workspace.id, stranger.id, 'employee');
+    const { user: mgr } = await createUser();
+    const mgrMember = await addMember(workspace.id, mgr.id, 'manager');
+    const { user: rep } = await createUser();
+    const repMember = await addMember(workspace.id, rep.id, 'employee', mgrMember.id);
+    const { user: creator } = await createUser();
+    const creatorMember = await addMember(workspace.id, creator.id, 'employee');
+
+    const task = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: creatorMember.id, assigneeId: repMember.id });
+
+    const denied = await upload(workspace.id, task.id, authHeader(stranger.id, stranger.email));
+    expect(denied.status).toBe(403);
+    expect(stub.uploads).toHaveLength(0);
+    expect(await prisma().attachment.count({ where: { taskId: task.id } })).toBe(0);
+
+    expect((await upload(workspace.id, task.id, authHeader(rep.id, rep.email))).status).toBe(201);      // assignee
+    expect((await upload(workspace.id, task.id, authHeader(creator.id, creator.email))).status).toBe(201); // creator
+    expect((await upload(workspace.id, task.id, authHeader(mgr.id, mgr.email))).status).toBe(201);        // manager of assignee
+    expect((await upload(workspace.id, task.id, authHeader(admin.id, admin.email))).status).toBe(201);    // admin
+    expect(stub.uploads).toHaveLength(4);
+    void adminMember;
+  });
+
+  it('a manager who does not manage the assignee is a stranger → 403', async () => {
+    const { workspace, list, member: adminMember } = await seedWorkspace();
+    const { user: mgr } = await createUser();
+    await addMember(workspace.id, mgr.id, 'manager');
+    const { user: emp } = await createUser();
+    const empMember = await addMember(workspace.id, emp.id, 'employee');
+    const task = await createTask({ workspaceId: workspace.id, listId: list.id, creatorId: adminMember.id, assigneeId: empMember.id });
+
+    expect((await upload(workspace.id, task.id, authHeader(mgr.id, mgr.email))).status).toBe(403);
+    expect(stub.uploads).toHaveLength(0);
   });
 });

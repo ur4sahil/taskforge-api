@@ -17,7 +17,11 @@ function makeService(prismaOverrides: any = {}, jwtOverrides: any = {}) {
     ...jwtOverrides,
   };
   const config: any = { get: jest.fn().mockImplementation((k: string) => (k === 'auth.jwtAccessSecret' ? 'secret' : '15m')) };
-  return { service: new AuthService(prisma, jwt, config), prisma, jwt, config };
+  const email: any = {
+    sendPasswordReset: jest.fn().mockResolvedValue({ sent: false }),
+    sendPasswordResetNotApplicable: jest.fn().mockResolvedValue({ sent: false }),
+  };
+  return { service: new AuthService(prisma, jwt, config, email), prisma, jwt, config, email };
 }
 
 describe('AuthService', () => {
@@ -120,10 +124,20 @@ describe('AuthService', () => {
         .rejects.toBeInstanceOf(UnauthorizedException);
     });
 
+    it('rejects a valid token whose user has been deactivated', async () => {
+      const { service, prisma } = makeService();
+      prisma.refreshToken.findFirst.mockResolvedValue({
+        id: 'rt1', expiresAt: new Date(Date.now() + 60_000), userId: 'u1', user: { email: 'a@b.com', isActive: false },
+      });
+      await expect(service.refresh({ refreshToken: 'valid' } as any))
+        .rejects.toBeInstanceOf(UnauthorizedException);
+      expect(prisma.refreshToken.create).not.toHaveBeenCalled();
+    });
+
     it('revokes the old refresh token before issuing new ones', async () => {
       const { service, prisma } = makeService();
       prisma.refreshToken.findFirst.mockResolvedValue({
-        id: 'rt1', expiresAt: new Date(Date.now() + 60_000), userId: 'u1', user: { email: 'a@b.com' },
+        id: 'rt1', expiresAt: new Date(Date.now() + 60_000), userId: 'u1', user: { email: 'a@b.com', isActive: true },
       });
       prisma.refreshToken.create.mockResolvedValue({});
       await service.refresh({ refreshToken: 'valid' } as any);

@@ -4,6 +4,9 @@ import { bootstrapApp } from '../fixtures/app';
 import { truncateAll, disconnect, prisma } from '../fixtures/db';
 import { seedWorkspace, createTask } from '../fixtures/factories';
 import { authHeader } from '../fixtures/auth';
+import { RemindersService } from '../../src/modules/reminders/reminders.module';
+import { ReminderProcessor } from '../../src/workers/workers.module';
+import { dateKeyToDb } from '../../src/common/utils/dates';
 
 let app: INestApplication;
 beforeAll(async () => { app = await bootstrapApp(); });
@@ -158,5 +161,156 @@ describe('Reminders', () => {
     await request(srv())
       .get(`/api/v1/workspaces/${workspace.id}/tasks/${task.id}/reminders`)
       .expect(401);
+  });
+
+  describe('validation', () => {
+    const bad: Array<[string, any]> = [
+      ['unknown type', { type: 'bogus', exactTime: new Date(Date.now() + 3600000).toISOString() }],
+      ['exact without exactTime', { type: 'exact' }],
+      ['exact with a non-ISO time', { type: 'exact', exactTime: 'tomorrow' }],
+      ['relative without an offset', { type: 'relative' }],
+      ['relative with an unknown unit', { type: 'relative', relativeOffsetValue: 1, relativeOffsetUnit: 'weeks' }],
+      ['relative with a negative offset', { type: 'relative', relativeOffsetValue: -5, relativeOffsetUnit: 'hours' }],
+    ];
+    it.each(bad)('rejects %s with 400', async (_n, body) => {
+      const { workspace, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10') } });
+      const res = await request(srv()).post(`/api/v1/workspaces/${workspace.id}/tasks/${task.id}/reminders`).set(headers).send(body);
+      expect(res.status).toBe(400);
+      expect(await prisma().reminder.count()).toBe(0);
+    });
+  });
+
+  describe('recurring reminders', () => {
+    it('are rejected with 400 instead of storing a row that never fires', async () => {
+      const { workspace, task, headers } = await setup();
+      const res = await request(srv())
+        .post(`/api/v1/workspaces/${workspace.id}/tasks/${task.id}/reminders`)
+        .set(headers).send({ type: 'recurring' });
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toBe('Recurring reminders are not supported yet');
+      expect(await prisma().reminder.count()).toBe(0);
+    });
+  });
+
+  describe('relative reminders', () => {
+    const post = (wid: string, tid: string, headers: any, body: any) =>
+      request(srv()).post(`/api/v1/workspaces/${wid}/tasks/${tid}/reminders`).set(headers).send(body);
+
+    it('fire relative to 09:00 on the due day in the workspace timezone (default America/New_York) when the task has no dueTime', async () => {
+      const { workspace, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10') } });
+      const res = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 2, relativeOffsetUnit: 'hours' });
+      expect(res.status).toBe(201);
+      expect(res.body.data).toMatchObject({ type: 'relative', relativeOffsetValue: 2, relativeOffsetUnit: 'hours', exactTime: null, isFired: false });
+      // 09:00 EDT = 13:00Z, minus 2h.
+      expect(new Date(res.body.data.nextFireTime).toISOString()).toBe('2030-06-10T11:00:00.000Z');
+    });
+
+    it('use the task dueTime when set, and the offset unit days', async () => {
+      const { workspace, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10'), dueTime: '17:30' } });
+      const res = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 1, relativeOffsetUnit: 'days' });
+      expect(res.status).toBe(201);
+      // 17:30 EDT = 21:30Z on Jun 10, minus 1 day.
+      expect(new Date(res.body.data.nextFireTime).toISOString()).toBe('2030-06-09T21:30:00.000Z');
+    });
+
+    it('honour settings.timezone on the workspace', async () => {
+      const { workspace, task, headers } = await setup();
+      await prisma().workspace.update({ where: { id: workspace.id }, data: { settings: { timezone: 'Europe/London' } as any } });
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-01-15') } });
+      const res = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 30, relativeOffsetUnit: 'minutes' });
+      expect(res.status).toBe(201);
+      // 09:00 GMT = 09:00Z, minus 30 min.
+      expect(new Date(res.body.data.nextFireTime).toISOString()).toBe('2030-01-15T08:30:00.000Z');
+    });
+
+    it('stay on the right local time across a DST boundary (due day after spring-forward)', async () => {
+      const { workspace, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2027-03-15') } }); // DST began 2027-03-14
+      const res = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 0, relativeOffsetUnit: 'minutes' });
+      expect(new Date(res.body.data.nextFireTime).toISOString()).toBe('2027-03-15T13:00:00.000Z'); // 09:00 EDT
+    });
+
+    it('are rejected with 400 when the task has no due date', async () => {
+      const { workspace, task, headers } = await setup();
+      const res = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 1, relativeOffsetUnit: 'hours' });
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toMatch(/no due date/i);
+    });
+
+    it('recomputeForTask moves nextFireTime when the due date changes, clears a snooze, and leaves fired/dismissed/exact reminders alone', async () => {
+      const { workspace, member, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10') } });
+      const rel = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 1, relativeOffsetUnit: 'hours' });
+      expect(new Date(rel.body.data.nextFireTime).toISOString()).toBe('2030-06-10T12:00:00.000Z');
+      await prisma().reminder.update({ where: { id: rel.body.data.id }, data: { snoozedUntil: new Date('2030-06-10T12:30:00.000Z'), nextFireTime: new Date('2030-06-10T12:30:00.000Z') } });
+      const fired = await seedReminder(task.id, member.id, { type: 'relative', exactTime: null, relativeOffsetValue: 1, relativeOffsetUnit: 'hours', isFired: true, nextFireTime: new Date('2030-06-10T12:00:00.000Z') });
+      const dismissed = await seedReminder(task.id, member.id, { type: 'relative', exactTime: null, relativeOffsetValue: 1, relativeOffsetUnit: 'hours', isDismissed: true, nextFireTime: new Date('2030-06-10T12:00:00.000Z') });
+      const exact = await seedReminder(task.id, member.id, { nextFireTime: new Date('2030-06-01T00:00:00.000Z') });
+
+      // Due date moves two days later and gains a time (the tasks engineer calls this hook).
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-12'), dueTime: '08:00' } });
+      const touched = await app.get(RemindersService).recomputeForTask(task.id);
+      expect(touched).toBe(1);
+
+      const byId = Object.fromEntries((await prisma().reminder.findMany({})).map(r => [r.id, r]));
+      // 08:00 EDT = 12:00Z, minus 1h.
+      expect(byId[rel.body.data.id].nextFireTime!.toISOString()).toBe('2030-06-12T11:00:00.000Z');
+      expect(byId[rel.body.data.id].snoozedUntil).toBeNull();
+      expect(byId[fired.id].nextFireTime!.toISOString()).toBe('2030-06-10T12:00:00.000Z');
+      expect(byId[dismissed.id].nextFireTime!.toISOString()).toBe('2030-06-10T12:00:00.000Z');
+      expect(byId[exact.id].nextFireTime!.toISOString()).toBe('2030-06-01T00:00:00.000Z');
+    });
+
+    it('recomputeForTask clears nextFireTime when the due date is removed, and is a no-op for unknown tasks', async () => {
+      const { workspace, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10') } });
+      const rel = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 1, relativeOffsetUnit: 'hours' });
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: null } });
+      expect(await app.get(RemindersService).recomputeForTask(task.id)).toBe(1);
+      expect((await prisma().reminder.findUnique({ where: { id: rel.body.data.id } }))!.nextFireTime).toBeNull();
+      expect(await app.get(RemindersService).recomputeForTask('00000000-0000-0000-0000-000000000000')).toBe(0);
+    });
+
+    it('PATCH with a new offset recomputes nextFireTime', async () => {
+      const { workspace, task, headers } = await setup();
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10') } });
+      const rel = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 1, relativeOffsetUnit: 'hours' });
+      const res = await request(srv()).patch(`/api/v1/workspaces/${workspace.id}/reminders/${rel.body.data.id}`).set(headers).send({ relativeOffsetValue: 1, relativeOffsetUnit: 'days' });
+      expect(res.status).toBe(200);
+      expect(new Date(res.body.data.nextFireTime).toISOString()).toBe('2030-06-09T13:00:00.000Z');
+      const bad = await request(srv()).patch(`/api/v1/workspaces/${workspace.id}/reminders/${rel.body.data.id}`).set(headers).send({ relativeOffsetUnit: 'weeks' });
+      expect(bad.status).toBe(400);
+    });
+
+    it('fire once: the processor marks isFired and a second tick does not refire', async () => {
+      const { workspace, member, task, headers } = await setup();
+      // Due today with a dueTime far enough in the past that offset 0 is already due.
+      const past = new Date(Date.now() - 2 * 3600000);
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb(past.toISOString().slice(0, 10)) } });
+      const rel = await post(workspace.id, task.id, headers, { type: 'relative', relativeOffsetValue: 0, relativeOffsetUnit: 'minutes' });
+      expect(rel.status).toBe(201);
+      // Force it due regardless of the wall clock.
+      await prisma().reminder.update({ where: { id: rel.body.data.id }, data: { nextFireTime: new Date(Date.now() - 60000) } });
+
+      const dispatched: any[] = [];
+      const stub = { dispatch: async (p: any) => { dispatched.push(p); return { id: 'n' }; } };
+      const proc = new ReminderProcessor(prisma() as any, stub as any);
+      await proc.process({ name: 'tick', data: {} } as any);
+      await proc.process({ name: 'tick', data: {} } as any);
+
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({ type: 'reminder', recipientMemberId: member.id, entityId: task.id });
+      const after = await prisma().reminder.findUnique({ where: { id: rel.body.data.id } });
+      expect(after!.isFired).toBe(true);
+      expect(after!.snoozedUntil).toBeNull();
+      // Fired reminders are not re-armed by a due-date change.
+      await prisma().task.update({ where: { id: task.id }, data: { dueDate: dateKeyToDb('2030-06-10') } });
+      expect(await app.get(RemindersService).recomputeForTask(task.id)).toBe(0);
+      await proc.process({ name: 'tick', data: {} } as any);
+      expect(dispatched).toHaveLength(1);
+    });
   });
 });

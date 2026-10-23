@@ -69,9 +69,11 @@ export async function createTask(opts: {
   creatorId: string;
   assigneeId?: string | null;
   title?: string;
+  description?: string;
   status?: string;
   priority?: string;
   dueDate?: Date;
+  archivedAt?: Date;
 }) {
   return prisma().task.create({
     data: {
@@ -80,11 +82,18 @@ export async function createTask(opts: {
       creatorId: opts.creatorId,
       assigneeId: opts.assigneeId ?? null,
       title: opts.title || `Task ${uniq('task')}`,
+      description: opts.description ?? null,
       status: (opts.status || 'todo') as any,
       priority: (opts.priority || 'medium') as any,
       dueDate: opts.dueDate || null,
+      archivedAt: opts.archivedAt || null,
     },
   });
+}
+
+/** Put a member on a list (what makes it visible to an employee / their manager). */
+export async function addListMember(listId: string, workspaceMemberId: string, addedById = workspaceMemberId) {
+  return prisma().listMember.create({ data: { listId, workspaceMemberId, addedById } });
 }
 
 // Convenience: complete admin workspace with one list. Returns ids + a workspace

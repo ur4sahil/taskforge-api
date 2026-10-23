@@ -61,11 +61,37 @@ export class WorkspacesService {
     return { members, meta: paginationMeta(total, page, perPage) };
   }
 
+  /** Self-service: a member changes their own timezone. Validated as a real
+   *  IANA zone so due-date math never has to fall back silently. */
+  async updateOwnTimezone(wid: string, mid: string, timezone: string) {
+    if (!isValidTimezone(timezone)) throw new BadRequestException('timezone must be a valid IANA time zone, e.g. America/New_York');
+    const m = await this.prisma.workspaceMember.findFirst({ where: { id: mid, workspaceId: wid, isActive: true }, select: { id: true } });
+    if (!m) throw new NotFoundException('Member not found');
+    return this.prisma.workspaceMember.update({
+      where: { id: mid },
+      data: { timezone },
+      include: { user: { select: { id: true, email: true, name: true } } },
+    });
+  }
+
+  /** True when `m` is the only active admin left in its workspace. Demoting or
+   *  deactivating them would leave nobody able to manage the workspace. */
+  private async isLastActiveAdmin(m: { workspaceId: string; role: string; isActive: boolean }) {
+    if (m.role !== 'admin' || !m.isActive) return false;
+    const admins = await this.prisma.workspaceMember.count({ where: { workspaceId: m.workspaceId, role: 'admin', isActive: true } });
+    return admins <= 1;
+  }
+
   async updateMember(wid: string, mid: string, dto: UpdateMemberDto) {
     const m = await this.prisma.workspaceMember.findFirst({ where: { id: mid, workspaceId: wid } });
     if (!m) throw new NotFoundException('Member not found');
     const data: any = {};
-    if (dto.role !== undefined) data.role = dto.role;
+    if (dto.role !== undefined) {
+      if (dto.role !== 'admin' && await this.isLastActiveAdmin(m)) {
+        throw new BadRequestException('Cannot change the role of the only active admin — promote another member first');
+      }
+      data.role = dto.role;
+    }
     if (dto.managerId !== undefined) {
       // A manager must be an active member of THIS workspace and not the member
       // themself. null clears the manager.
@@ -79,7 +105,10 @@ export class WorkspacesService {
       }
       data.managerId = dto.managerId;
     }
-    if (dto.timezone !== undefined) data.timezone = dto.timezone;
+    if (dto.timezone !== undefined) {
+      if (!isValidTimezone(dto.timezone)) throw new BadRequestException('timezone must be a valid IANA time zone, e.g. America/New_York');
+      data.timezone = dto.timezone;
+    }
     return this.prisma.workspaceMember.update({
       where: { id: mid },
       data,
@@ -124,16 +153,35 @@ export class WorkspacesService {
   }
 
   async deactivateMember(wid: string, mid: string) {
-    await this.assertMemberInWorkspace(wid, mid);
+    const m = await this.prisma.workspaceMember.findFirst({ where: { id: mid, workspaceId: wid } });
+    if (!m) throw new NotFoundException('Member not found');
+    if (await this.isLastActiveAdmin(m)) {
+      throw new BadRequestException('Cannot deactivate the only active admin — promote another member first');
+    }
     const open = await this.prisma.task.count({
-      where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null },
+      where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null, archivedAt: null },
     });
     if (open > 0) throw new BadRequestException(`${open} open tasks — reassign first`);
-    return this.prisma.workspaceMember.update({ where: { id: mid }, data: { isActive: false } });
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.workspaceMember.update({ where: { id: mid }, data: { isActive: false } }),
+      // Kill their sessions: WorkspaceGuard already blocks inactive members, but
+      // without this a refresh token keeps minting access tokens for 7 days.
+      this.prisma.refreshToken.updateMany({ where: { userId: m.userId, isRevoked: false }, data: { isRevoked: true } }),
+    ]);
+    return updated;
   }
 
   async reactivateMember(wid: string, mid: string) {
     await this.assertMemberInWorkspace(wid, mid);
     return this.prisma.workspaceMember.update({ where: { id: mid }, data: { isActive: true } });
+  }
+}
+
+function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
   }
 }

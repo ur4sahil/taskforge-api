@@ -14,3 +14,9 @@ export class UpdateMemberDto {
   @IsOptional() @IsUUID() managerId?: string | null;
   @IsOptional() @IsString() timezone?: string;
 }
+
+/** What a member may change about their own membership. IANA validity is
+ *  checked in the service (class-validator has no timezone rule). */
+export class UpdateOwnMemberDto {
+  @IsString() @IsNotEmpty() @MaxLength(50) timezone: string = '';
+}

@@ -22,10 +22,10 @@ export class ReportsService {
     const { today, tomorrow } = bounds ?? await this.dayBounds(wid);
     const weekAgo = new Date(Date.now() - 7 * 86400000);
     const [open, overdue, dueToday, done7d] = await Promise.all([
-      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null } }),
-      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, dueDate: { lt: today }, deletedAt: null } }),
-      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, dueDate: { gte: today, lt: tomorrow }, deletedAt: null } }),
-      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: 'done', completedAt: { gte: weekAgo }, deletedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, deletedAt: null, archivedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: { not: 'done' }, dueDate: { lt: today }, deletedAt: null, archivedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, dueDate: { gte: today, lt: tomorrow }, deletedAt: null, archivedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, assigneeId: mid, status: 'done', completedAt: { gte: weekAgo }, deletedAt: null, archivedAt: null } }),
     ]);
     return { open, overdue, dueToday, completedThisWeek: done7d };
   }
@@ -38,10 +38,10 @@ export class ReportsService {
   async workspace(wid: string) {
     const { today } = await this.dayBounds(wid);
     const [total, open, overdue, byStatus] = await Promise.all([
-      this.prisma.task.count({ where: { workspaceId: wid, deletedAt: null } }),
-      this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, deletedAt: null } }),
-      this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, dueDate: { lt: today }, deletedAt: null } }),
-      this.prisma.task.groupBy({ by: ['status'], _count: true, where: { workspaceId: wid, deletedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, deletedAt: null, archivedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, deletedAt: null, archivedAt: null } }),
+      this.prisma.task.count({ where: { workspaceId: wid, status: { not: 'done' }, dueDate: { lt: today }, deletedAt: null, archivedAt: null } }),
+      this.prisma.task.groupBy({ by: ['status'], _count: true, where: { workspaceId: wid, deletedAt: null, archivedAt: null } }),
     ]);
     return { total, open, overdue, byStatus };
   }

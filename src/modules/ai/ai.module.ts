@@ -5,6 +5,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { CurrentMember } from '../../common/decorators';
 import { WorkspaceGuard } from '../../common/guards';
 import { successResponse } from '../../common/dto/response.dto';
+import { listScope } from '../../common/utils/list-access';
 
 export class AiChatDto { @IsString() @IsNotEmpty() message: string = ''; }
 export class AiParseDto { @IsString() @IsNotEmpty() input: string = ''; }
@@ -15,7 +16,12 @@ export class AiService {
   async chat(wid: string, member: any, message: string) {
     const key = this.config.get<string>('ai.anthropicApiKey');
     if (!key) return { response: 'AI not configured. Set ANTHROPIC_API_KEY.' };
-    const tasks = await this.prisma.task.findMany({ where: { workspaceId: wid, deletedAt: null }, select: { id: true, title: true, status: true, priority: true, dueDate: true }, take: 50, orderBy: { updatedAt: 'desc' } });
+    // The prompt context obeys the same visibility as GET /tasks: non-admins only
+    // get tasks from lists they can open; archived and trashed tasks never go in.
+    const tasks = await this.prisma.task.findMany({
+      where: { workspaceId: wid, deletedAt: null, archivedAt: null, ...(await listScope(this.prisma, wid, member)) },
+      select: { id: true, title: true, status: true, priority: true, dueDate: true }, take: 50, orderBy: { updatedAt: 'desc' },
+    });
     try {
       const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' }, body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 4096, system: `You are TaskForge AI. Help ${member.role} manage tasks. Context: ${JSON.stringify(tasks.slice(0, 20))}`, messages: [{ role: 'user', content: message }] }) });
       const d = await r.json() as any;

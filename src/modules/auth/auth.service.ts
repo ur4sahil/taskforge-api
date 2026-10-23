@@ -1,18 +1,31 @@
-import { Injectable, ConflictException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable, Logger, BadRequestException, ConflictException, ForbiddenException, NotFoundException, UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
-import { SignupDto, LoginDto, RefreshTokenDto } from './dto';
+import { EmailService } from '../../common/email/email.module';
+import { SignupDto, LoginDto, RefreshTokenDto, ChangePasswordDto } from './dto';
 import { signupEnabled } from '../../config';
+
+/** Forgot-password links live this long. Short on purpose: the raw token is
+ *  sitting in an inbox. */
+export const PASSWORD_RESET_EXPIRY_MINUTES = 60;
+
+/** Revoked / expired refresh tokens older than this are pruned opportunistically. */
+const REFRESH_TOKEN_PRUNE_AGE_MS = 30 * 86400000;
 
 @Injectable()
 export class AuthService {
+  private readonly log = new Logger('AuthService');
+
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
     private config: ConfigService,
+    private email: EmailService,
   ) {}
 
   async signup(dto: SignupDto, ip?: string, ua?: string) {
@@ -58,6 +71,9 @@ export class AuthService {
       include: { user: true },
     });
     if (!stored || stored.expiresAt < new Date()) throw new UnauthorizedException('Invalid refresh token');
+    // A deactivated user keeps a valid-looking refresh token until it expires;
+    // without this check they could mint access tokens for 7 more days.
+    if (!stored.user.isActive) throw new UnauthorizedException('Account deactivated');
     await this.prisma.refreshToken.update({ where: { id: stored.id }, data: { isRevoked: true } });
     return this.generateTokens(stored.userId, stored.user.email, ip, ua);
   }
@@ -87,11 +103,123 @@ export class AuthService {
     };
   }
 
-  async logout(token: string) {
+  async logout(token: string, userId?: string) {
     await this.prisma.refreshToken.updateMany({
       where: { tokenHash: this.hashToken(token) },
       data: { isRevoked: true },
     });
+    // Opportunistic hygiene: drop this user's dead tokens (revoked, or expired)
+    // once they're a month old. Cheap, and keeps refresh_tokens from growing
+    // forever without a dedicated worker.
+    if (userId) {
+      const cutoff = new Date(Date.now() - REFRESH_TOKEN_PRUNE_AGE_MS);
+      await this.prisma.refreshToken.deleteMany({
+        where: {
+          userId,
+          createdAt: { lt: cutoff },
+          OR: [{ isRevoked: true }, { expiresAt: { lt: new Date() } }],
+        },
+      }).catch((e: any) => this.log.warn(`refresh token prune failed: ${e?.message || e}`));
+    }
+  }
+
+  // ───── Forgot / reset password ───────────────────────────────────────────
+
+  /** Always resolves to the same message so the endpoint cannot be used to
+   *  discover which emails have accounts. Side effects only happen for a real,
+   *  active account: previous unused tokens are invalidated, a fresh one is
+   *  stored as sha256, and the raw token goes out by email. Google-only
+   *  accounts get a different email (there's no password to reset) but the
+   *  same response. Emails are sent fire-and-forget so the response time does
+   *  not depend on the mail provider either. */
+  async forgotPassword(email: string): Promise<{ message: string }> {
+    const message = 'If an account exists for that email, we have sent password reset instructions.';
+    const user = await this.prisma.user.findUnique({ where: { email: email.trim().toLowerCase() } });
+    if (!user || !user.isActive) return { message };
+
+    const appUrl = (this.config.get<string>('app.appUrl') || 'http://localhost:3000').replace(/\/$/, '');
+
+    if (!user.passwordHash) {
+      this.email.sendPasswordResetNotApplicable(user.email, user.name, `${appUrl}/auth/login`)
+        .catch((e: any) => this.log.error(`google-only notice failed for ${user.email}: ${e?.message || e}`));
+      return { message };
+    }
+
+    const token = randomBytes(32).toString('hex');
+    await this.prisma.$transaction([
+      this.prisma.passwordResetToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: this.hashToken(token),
+          expiresAt: new Date(Date.now() + PASSWORD_RESET_EXPIRY_MINUTES * 60000),
+        },
+      }),
+    ]);
+
+    this.email.sendPasswordReset(user.email, user.name, `${appUrl}/auth/reset-password/${token}`, PASSWORD_RESET_EXPIRY_MINUTES)
+      .catch((e: any) => this.log.error(`password reset email failed for ${user.email}: ${e?.message || e}`));
+    return { message };
+  }
+
+  /** For the reset page to show state before asking for a password. Reveals
+   *  only a masked email — the holder of the link already knows the address. */
+  async previewPasswordReset(token: string) {
+    const { user } = await this.findValidResetToken(token);
+    return { valid: true, email: maskEmail(user.email) };
+  }
+
+  /** Consume a reset link: set the new password, burn the token, kill every
+   *  existing session, and sign the user in fresh (same shape as login). */
+  async resetPassword(token: string, password: string, ip?: string, ua?: string) {
+    const reset = await this.findValidResetToken(token);
+    if (!reset.user.isActive) throw new UnauthorizedException('Account deactivated');
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // updateMany with usedAt: null makes a concurrent second submit of the same
+    // link lose the race instead of resetting twice.
+    const [used] = await this.prisma.$transaction([
+      this.prisma.passwordResetToken.updateMany({ where: { id: reset.id, usedAt: null }, data: { usedAt: new Date() } }),
+      this.prisma.user.update({ where: { id: reset.userId }, data: { passwordHash } }),
+      this.prisma.refreshToken.updateMany({ where: { userId: reset.userId, isRevoked: false }, data: { isRevoked: true } }),
+    ]);
+    if (used.count !== 1) throw new BadRequestException('Reset link has already been used');
+
+    return this.issueSessionForUser(reset.user, ip, ua);
+  }
+
+  /** Logged-in password change. Revokes every refresh token (other devices get
+   *  signed out) and hands back a new pair so the calling client stays in. */
+  async changePassword(userId: string, dto: ChangePasswordDto, ip?: string, ua?: string) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || !user.isActive) throw new UnauthorizedException('Invalid user');
+    if (!user.passwordHash) throw new BadRequestException('This account signs in with Google and has no password to change');
+    if (!(await bcrypt.compare(dto.currentPassword, user.passwordHash))) {
+      // 400, not 401: a 401 on an authenticated route reads as "session dead"
+      // to the web client's interceptor and would bounce the user to login.
+      throw new BadRequestException('Current password is incorrect');
+    }
+    const passwordHash = await bcrypt.hash(dto.newPassword, 12);
+    await this.prisma.$transaction([
+      this.prisma.user.update({ where: { id: userId }, data: { passwordHash } }),
+      this.prisma.refreshToken.updateMany({ where: { userId, isRevoked: false }, data: { isRevoked: true } }),
+    ]);
+    return this.generateTokens(user.id, user.email, ip, ua);
+  }
+
+  private async findValidResetToken(token: string) {
+    if (!token) throw new BadRequestException('Missing token');
+    const reset = await this.prisma.passwordResetToken.findUnique({
+      where: { tokenHash: this.hashToken(token) },
+      include: { user: true },
+    });
+    if (!reset) throw new NotFoundException('Reset link is invalid');
+    if (reset.usedAt) throw new BadRequestException('Reset link has already been used');
+    if (reset.expiresAt < new Date()) throw new BadRequestException('Reset link has expired');
+    return reset;
   }
 
   /** Mint a fresh session for a user without going through login. Used by the
@@ -137,4 +265,15 @@ export class AuthService {
     });
     return ms.map((m: any) => ({ id: m.workspace.id, name: m.workspace.name, slug: m.workspace.slug, role: m.role }));
   }
+}
+
+/** 'sahil@example.com' → 's***l@example.com'. Enough for "is this the account
+ *  I meant?" without handing the full address to whoever holds the link. */
+export function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  if (local.length <= 2) return `${local[0]}***${domain}`;
+  return `${local[0]}***${local[local.length - 1]}${domain}`;
 }
