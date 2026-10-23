@@ -504,6 +504,8 @@ async function runMobileFlows() {
       const r = c ? c.getBoundingClientRect() : null;
       return { bodyScrollHeight: document.body.scrollHeight, docScrollHeight: document.documentElement.scrollHeight, innerHeight: window.innerHeight, innerWidth: window.innerWidth, composer: r ? { top: Math.round(r.top), bottom: Math.round(r.bottom), inViewport: r.top >= 0 && r.bottom <= window.innerHeight + 1 } : null };
     });
+    // Messages render after the first page fetch; give them up to 10 s before judging the toolbar.
+    await page.locator('[data-message-id]').first().waitFor({ timeout: 10000 }).catch(() => {});
     const more = page.getByRole('button', { name: 'Message actions' });
     const cnt = await more.count();
     if (!cnt) throw new Error(`conversation "${picked.txt}" opened but no "Message actions" (⋯) button found; composer=${JSON.stringify(geo.composer)}`);
