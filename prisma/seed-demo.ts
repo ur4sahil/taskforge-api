@@ -964,12 +964,12 @@ class Builder {
     push({ type: 'task', name: 'Move-in inspection', createdById: jordan.id, visibility: 'workspace', data: taskTpl('Move-in walkthrough — unit', 'medium', 0, ['Condition report', 'Photos uploaded', 'Keys & fobs', 'Welcome packet', 'Utilities transferred'], jordan), createdAt: U.at('2024-09-03', '14:00'), updatedAt: U.at('2024-09-03', '14:00') });
     push({ type: 'task', name: 'Vendor invoice approval', createdById: priya.id, visibility: 'personal', data: taskTpl('Pay invoice — vendor', 'medium', 25, ['Match PO', 'Code to property', 'Approve', 'Schedule payment']), createdAt: U.at('2025-02-11', '10:30'), updatedAt: U.at('2025-02-11', '10:30') });
     push({ type: 'list', name: 'New property onboarding', description: 'Everything to do in the first 30 days after closing.', createdById: elena.id, visibility: 'workspace', createdAt: U.at('2025-04-22', '09:00'), updatedAt: U.at('2025-04-22', '09:00'),
-      data: { listName: 'Onboarding — {property}', listDescription: 'First 30 days after closing.', defaultAssigneeMemberId: kevin.id, tasks: [
+      data: { listName: 'Onboarding — property', listDescription: 'First 30 days after closing.', defaultAssigneeMemberId: kevin.id, tasks: [
         taskTpl('Register rental license', 'high', 10, ['Gather documents', 'Submit application', 'Pay fee'], kevin), taskTpl('Set up utilities in company name', 'high', 3, ['Electric', 'Water', 'Gas', 'Trash'], kevin),
         taskTpl('Add to insurance policy', 'high', 2, [], priya), taskTpl('Introduce ourselves to tenants', 'medium', 7, ['Letter', 'Portal invites'], jordan), taskTpl('Baseline inspection + photos', 'medium', 14, [], marcus),
       ] } });
     push({ type: 'list', name: 'Annual compliance calendar', createdById: sahil.id, visibility: 'personal', createdAt: U.at('2026-01-06', '16:10'), updatedAt: U.at('2026-01-06', '16:10'),
-      data: { listName: 'Compliance — {year}', listDescription: null, defaultAssigneeMemberId: null, tasks: [taskTpl('Rental license renewals', 'high', 45, []), taskTpl('Backflow tests', 'medium', 120, []), taskTpl('Fire extinguisher tags', 'medium', 200, []), taskTpl('LLC annual reports', 'high', 90, [])] } });
+      data: { listName: 'Compliance — year', listDescription: null, defaultAssigneeMemberId: null, tasks: [taskTpl('Rental license renewals', 'high', 45, []), taskTpl('Backflow tests', 'medium', 120, []), taskTpl('Fire extinguisher tags', 'medium', 200, []), taskTpl('LLC annual reports', 'high', 90, [])] } });
 
     const view = (row: any) => this.views.push({ id: this.rng.uuid(), workspaceId: this.wsId, groupBy: null, ...row });
     view({ createdById: marcus.id, name: 'Overdue work orders', type: 'list', filters: { overdue: true, listId: this.L('oak').id }, sort: { sortBy: 'dueDate', sortOrder: 'asc' }, visibility: 'shared', createdAt: U.at('2025-03-18', '08:45'), updatedAt: U.at('2025-03-18', '08:45') });
