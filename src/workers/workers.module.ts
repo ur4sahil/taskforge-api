@@ -167,6 +167,13 @@ export class WorkerScheduler implements OnApplicationBootstrap {
     }
     await queue.add(name, {}, {
       repeat: { pattern },
+      // The Supabase pooler drops connections for a few seconds several times a
+      // day (Prisma P1001). Without retries every such tick was simply lost — a
+      // missed reminder minute or overdue sweep. Three attempts at 30s / 60s /
+      // 120s ride out the blip; a tick that fails all three is a real outage
+      // and stays in the failed set for inspection.
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 30_000 },
       removeOnComplete: { count: 50 },
       removeOnFail: { count: 50 },
     });
